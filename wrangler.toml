@@ -1,0 +1,7 @@
+name = "aepipe"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[[analytics_engine_datasets]]
+binding = "LOGS"
+dataset = "aepipe"

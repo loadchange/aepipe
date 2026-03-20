@@ -1,8 +1,33 @@
 # aepipe
 
-A lightweight Cloudflare Worker for **multi-tenant** structured event ingestion and querying via [Workers Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/).
+**The Edge-Native Log Pipeline for Everyone.**
 
-Send JSON from any backend, query with SQL — no log aggregation stack required.
+A high-performance log gateway built on Cloudflare Workers + Analytics Engine — your **free, self-hosted alternative** to Datadog, AWS CloudWatch, and Alibaba Cloud SLS. Kill your overpriced log bills with $0 edge-native ingestion.
+
+## Why aepipe?
+
+In 2026, log services shouldn't be the silent assassin in your monthly cloud bill. aepipe redefines the cost-performance ratio of log ingestion and analysis.
+
+### Comparison with cloud giants
+
+| | Alibaba Cloud SLS | AWS CloudWatch | GCP Cloud Logging | **aepipe** |
+|---|---|---|---|---|
+| **Pricing** | Index + traffic + storage fees | $0.50/GB ingest + query fees | $0.50/GB ingest | **$0** (Cloudflare free tier) |
+| **Query language** | SQL (requires indexing) | Proprietary Insights syntax | Proprietary LQL syntax | **Native SQL** (Analytics Engine) |
+| **Deployment** | Install & configure Logtail | Configure CloudWatch Agent | Configure log routers | **Serverless, one-click deploy** |
+| **Global reach** | Limited to physical regions | Limited to physical regions | Limited to physical regions | **300+ edge nodes worldwide** |
+| **Data ownership** | Vendor-controlled | Vendor-controlled | Vendor-controlled | **100% yours** (your CF account) |
+| **Multi-tenancy** | Per-project billing | Per-log-group billing | Per-project billing | **Unlimited projects, $0** |
+
+### Core advantages
+
+**1. Truly free SLS alternative** — Leverages Cloudflare Analytics Engine to bypass the traditional cloud vendor playbook of charging per "scan volume" or "index size". High-concurrency log ingestion and real-time analytics within Cloudflare's free tier.
+
+**2. Dead-simple log funnel** — No complex regex or field mapping configs. Dynamic schema mapping: throw JSON into the pipe, get SQL-queryable structured data out.
+
+**3. Cross-cloud log bridge** — Whether your app runs on AWS EC2, Alibaba Cloud Function Compute, or a Raspberry Pi at home — one HTTP POST sends logs to the nearest global edge node, instantly queryable.
+
+**4. Zero bill anxiety** — Fully open-source, deployed under your own Cloudflare account. No hidden fees, no closed-source black boxes, full data sovereignty.
 
 ## How it works
 
@@ -12,7 +37,7 @@ Your App ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()─�
                                                                    SQL API ◀── You
 ```
 
-Events are scoped by **project** and **logstore** — one deployment serves many teams/apps:
+Events are scoped by **Project** and **LogStore** — one deployment serves many teams/apps:
 
 ```
 aepipe instance
@@ -128,8 +153,8 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | `blob2` | logstore name | Sub-tenant filter |
 | `blob3` | event (required) | User's event string |
 | `blob4` | level | Defaults to "info" |
-| `blob5`–`blob20` | user `blobs[0..15]` | Max 16 extra blobs, ≤16KB each |
-| `double1`–`double20` | user `doubles[0..19]` | Up to 20 doubles |
+| `blob5`-`blob20` | user `blobs[0..15]` | Max 16 extra blobs, <=16KB each |
+| `double1`-`double20` | user `doubles[0..19]` | Up to 20 doubles |
 
 ## Error responses
 

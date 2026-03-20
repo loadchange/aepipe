@@ -1,8 +1,33 @@
 # aepipe
 
-一个轻量级 Cloudflare Worker，提供**多租户**结构化事件写入与查询服务，基于 [Workers Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/)。
+**部署在边缘的日志管道，人人可用。**
 
-从任意后端发送 JSON，用 SQL 查询 —— 无需搭建日志聚合架构。
+基于 Cloudflare Workers + Analytics Engine 构建的高性能日志网关 —— 你的**免费版 SLS**，以 **$0 成本**彻底终结阿里云、AWS、GCP 的高昂日志账单。
+
+## 为什么选 aepipe？
+
+在 2026 年，日志服务不该成为你月度账单里的"刺客"。aepipe 重新定义了日志采集与分析的性价比。
+
+### 降维打击：对比云巨头
+
+| | 阿里云 SLS | AWS CloudWatch | GCP Cloud Logging | **aepipe** |
+|---|---|---|---|---|
+| **计费逻辑** | 索引费 + 流量费 + 存储费 | 写入费 ($0.50/GB) + 查询费 | 注入费 ($0.50/GB) | **$0**（基于 CF 免费额度） |
+| **查询语法** | SQL（需开启索引） | 专用 Insights 语法 | 专用 LQL 语法 | **原生 SQL**（AE 驱动） |
+| **部署成本** | 需安装/配置 Logtail | 需配置 CloudWatch Agent | 需配置日志路由器 | **Serverless 零部署，一键即开** |
+| **全球接入** | 受限于物理 Region | 受限于物理 Region | 受限于物理 Region | **全球 300+ 边缘节点就近写入** |
+| **数据主权** | 厂商托管 | 厂商托管 | 厂商托管 | **100% 归你**（你的 CF 账号） |
+| **多租户** | 按项目计费 | 按日志组计费 | 按项目计费 | **无限项目，$0** |
+
+### 核心价值
+
+**1. 真正的"免费版 SLS"** —— 利用 Cloudflare Analytics Engine 的底层能力，绕过传统云厂商按"扫描量"或"索引量"收割用户的套路。在 Cloudflare 免费层级内，享受极高并发的日志注入与实时分析。
+
+**2. 极致简单的"日志漏斗"** —— 不再需要配置复杂的正则表达式和字段映射。动态 Schema 映射：JSON 往管道里一扔，自动变成可供 SQL 查询的结构化数据。
+
+**3. 跨云兼容的日志桥梁** —— 不管你的应用跑在 AWS EC2、阿里云函数计算，还是家里的树莓派上，只需一个 HTTP POST，日志瞬间飞往全球边缘节点，化为可查询的结构化指标。
+
+**4. 拒绝"账单焦虑"** —— 代码完全开源，部署在你自己的 Cloudflare 账号下。没有隐藏计费，没有闭源黑盒，一切数据主权归你。
 
 ## 工作原理
 
@@ -128,7 +153,7 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | `blob2` | LogStore 名称 | 子租户过滤 |
 | `blob3` | event（必填） | 用户的事件字符串 |
 | `blob4` | level | 默认 "info" |
-| `blob5`–`blob20` | 用户 `blobs[0..15]` | 最多 16 个额外 blob，每个 ≤16KB |
+| `blob5`–`blob20` | 用户 `blobs[0..15]` | 最多 16 个额外 blob，每个 <=16KB |
 | `double1`–`double20` | 用户 `doubles[0..19]` | 最多 20 个 double |
 
 ## 错误响应

@@ -2,6 +2,25 @@ name = "aepipe"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
+# Uncomment and set your custom domain:
+# routes = [
+#   { pattern = "aepipe.yourdomain.com", custom_domain = true }
+# ]
+
+# CF_ACCOUNT_ID is required for query/rawlog endpoints.
+# Set it via: npx wrangler secret put CF_ACCOUNT_ID
+# Or uncomment below for convenience (not recommended for public repos):
+# [vars]
+# CF_ACCOUNT_ID = "your-account-id"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1
+
 [[analytics_engine_datasets]]
 binding = "LOGS"
 dataset = "aepipe"

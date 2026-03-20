@@ -29,15 +29,17 @@ No test suite or linter is configured.
 Three source files, no framework:
 
 - **`src/index.ts`** — Router, shared types (`Env`, `DataPoint`), auth, CORS, name validation
-- **`src/ingest.ts`** — Ingest handler + `mapDataPoint(project, logstore, point)`
-- **`src/query.ts`** — Query proxy (SQL rewrite + CF API call), project/logstore listing
+- **`src/ingest.ts`** — Ingest handler + `mapDataPoint(project, logstore, point)`, structured log handler (`handleLog`)
+- **`src/query.ts`** — Query proxy (SQL rewrite + CF API call), raw log query (CF Telemetry API), project/logstore listing
 
 ### Routes
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/{project}/{logstore}/ingest` | Write log points |
-| `POST` | `/v1/{project}/{logstore}/query` | Query logs (SQL proxy) |
+| `POST` | `/v1/{project}/{logstore}/ingest` | Write structured event points to Analytics Engine |
+| `POST` | `/v1/{project}/{logstore}/query` | Query structured logs (SQL proxy to Analytics Engine) |
+| `POST` | `/v1/{project}/{logstore}/log` | Write raw logs via Workers Observability (console methods) |
+| `POST` | `/v1/{project}/{logstore}/rawlog` | Query raw Worker logs via CF Telemetry REST API |
 | `GET` | `/v1/projects` | List all projects |
 | `GET` | `/v1/{project}/logstores` | List logstores in a project |
 | `OPTIONS` | `*` | CORS preflight |
@@ -51,8 +53,8 @@ Project and logstore names: validated against `^[a-zA-Z0-9_-]{1,64}$`.
 ### Secrets (set via `npx wrangler secret put`)
 
 - `ADMIN_TOKEN` — Bearer token for all API operations
-- `CF_ACCOUNT_ID` — Cloudflare account ID (for query API)
-- `CF_API_TOKEN` — Cloudflare API token with Analytics Engine read permission
+- `CF_ACCOUNT_ID` — Cloudflare account ID (for query/rawlog API calls)
+- `CF_API_TOKEN` — Cloudflare API token (requires **Account Analytics Read** + **Workers Scripts Read** permissions)
 
 ## Data Point Mapping
 

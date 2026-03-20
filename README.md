@@ -1,5 +1,7 @@
 # aepipe
 
+[中文文档](README.zh-CN.md)
+
 **The Edge-Native Log Pipeline for Everyone.**
 
 A high-performance log gateway built on Cloudflare Workers + Analytics Engine — your **free, self-hosted alternative** to Datadog, AWS CloudWatch, and Alibaba Cloud SLS. Kill your overpriced log bills with $0 edge-native ingestion.
@@ -32,8 +34,9 @@ In 2026, log services shouldn't be the silent assassin in your monthly cloud bil
 ## How it works
 
 ```
-Your App ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine
-                                                                        │
+Your App ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine (92 days)
+                              │                                         │
+                              └──console.log──▶ Workers Logs (7-30 days)│
                                                                    SQL API ◀── You
 ```
 
@@ -46,6 +49,18 @@ aepipe instance
 ```
 
 No external database. Projects and logstores are implicit, created on first write, discovered via SQL queries.
+
+### Dual log storage
+
+aepipe writes every data point to **two** independent storage layers:
+
+| | Analytics Engine (query) | Workers Logs (rawlog) |
+|---|---|---|
+| **Data format** | Structured (blobs + doubles) | Raw JSON snapshot |
+| **Retention** | **92 days** | Free: **7 days** / Paid: **30 days** |
+| **Daily limit** | No hard cap on free tier | Free: 200K logs/day (then 1% sampled) |
+| **Query method** | SQL via `/query` endpoint | Telemetry API via `/rawlog` endpoint |
+| **Best for** | Metrics, aggregations, dashboards | Debugging, audit trail, raw payloads |
 
 ## Setup
 
@@ -64,6 +79,12 @@ name = "aepipe"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
 [[analytics_engine_datasets]]
 binding = "LOGS"
 dataset = "aepipe"
@@ -73,8 +94,8 @@ dataset = "aepipe"
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN       # shared auth token for all API operations
-npx wrangler secret put CF_ACCOUNT_ID     # Cloudflare account ID (for query API)
-npx wrangler secret put CF_API_TOKEN      # CF API token with Analytics Engine read permission
+npx wrangler secret put CF_ACCOUNT_ID     # your Cloudflare account ID
+npx wrangler secret put CF_API_TOKEN      # CF API token (Account Analytics Read + Workers Scripts Read)
 ```
 
 ### 4. Deploy
@@ -113,7 +134,38 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/ingest 
 - `points` must be a non-empty array, max 250 per request
 - Points with missing or empty `event` are silently skipped
 
-### Query — `POST /v1/{project}/{logstore}/query`
+### Write raw log — `POST /v1/{project}/{logstore}/log`
+
+Write free-form log entries to Workers Logs (up to **7 days** on Free / **30 days** on Paid plan).
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/log \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      { "message": "user login failed", "level": "error", "userId": "u-42", "ip": "1.2.3.4" }
+    ]
+  }'
+```
+
+**Response:** `{ "ok": true, "written": 1 }`
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `logs[].message` | string | **yes** | Log message (entries without it are skipped) |
+| `logs[].level` | string | no | `debug` / `info` (default) / `warn` / `error` |
+| `logs[].*` | any | no | Any extra fields are preserved in the raw JSON |
+
+**Constraints:**
+- `logs` must be a non-empty array, max 250 per request
+- Level maps to `console.log` / `console.warn` / `console.error` / `console.debug` for filtering in Workers Logs
+
+### Query (structured) — `POST /v1/{project}/{logstore}/query`
+
+Query structured log data from Analytics Engine (up to **92 days**).
 
 ```bash
 curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/query \
@@ -125,6 +177,31 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/query \
 ```
 
 The worker auto-injects `blob1 = '{project}' AND blob2 = '{logstore}'` into the WHERE clause — users cannot read across tenant boundaries.
+
+### Raw log — `POST /v1/{project}/{logstore}/rawlog`
+
+Query raw JSON snapshots from Workers Logs via the CF Telemetry REST API (up to **7 days** on Free / **30 days** on Paid plan).
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/rawlog \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 50,
+    "start": "2026-03-20T00:00:00Z",
+    "end": "2026-03-20T12:00:00Z"
+  }'
+```
+
+**Request body:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | number | 50 | Max results (capped at 200) |
+| `start` | ISO string | 6 hours ago | Start of time range |
+| `end` | ISO string | now | End of time range |
+
+**Response:** `{ "logs": [{ "timestamp": "...", "level": "log", "data": { ... } }], "count": 1 }`
 
 ### List projects — `GET /v1/projects`
 
@@ -156,6 +233,30 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | `blob5`-`blob20` | user `blobs[0..15]` | Max 16 extra blobs, <=16KB each |
 | `double1`-`double20` | user `doubles[0..19]` | Up to 20 doubles |
 
+## Limits & pricing
+
+aepipe runs on Cloudflare's infrastructure. Here are the platform limits to be aware of:
+
+### Cloudflare Free plan
+
+| Resource | Limit | Exceeded behavior |
+|----------|-------|-------------------|
+| Worker requests | 100K/day | **Requests fail** (429/5XX) until UTC midnight reset |
+| Analytics Engine retention | 92 days | Auto-deleted after expiry |
+| Workers Logs retention | 7 days | Auto-deleted after expiry |
+| Workers Logs volume | 200K logs/day | Auto-sampled to 1% for remainder of day |
+
+### Cloudflare Paid plan ($5/month)
+
+| Resource | Limit | Exceeded behavior |
+|----------|-------|-------------------|
+| Worker requests | 10M included, then $0.50/M | Billed per usage |
+| Analytics Engine retention | 92 days | Auto-deleted after expiry |
+| Workers Logs retention | 30 days | Auto-deleted after expiry |
+| Workers Logs volume | 5B logs/day | Auto-sampled to 1% for remainder of day |
+
+All data (Analytics Engine and Workers Logs) is automatically cleaned up after the retention period — no manual action needed.
+
 ## Error responses
 
 | Status | Body |
@@ -164,6 +265,16 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | 401 | `{ "error": "unauthorized" }` |
 | 404 | `{ "error": "not found" }` |
 | 502 | `{ "error": "CF API ..." }` — upstream query failure |
+
+## Claude Code Skill
+
+Install the [query-aepipe](skills/query-aepipe/SKILL.md) skill for Claude Code to interact with your aepipe instance directly:
+
+```bash
+npx skills add loadchange/aepipe
+```
+
+The skill provides a Python CLI client supporting all API operations (ingest, query, log, rawlog, list projects/logstores) and advanced data processing (filtering, aggregation, time bucketing, SQLite export).
 
 ## Development
 
@@ -175,4 +286,4 @@ npm run tail     # stream live logs
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -1,5 +1,7 @@
 # aepipe
 
+[English](README.md)
+
 **部署在边缘的日志管道，人人可用。**
 
 基于 Cloudflare Workers + Analytics Engine 构建的高性能日志网关 —— 你的**免费版 SLS**，以 **$0 成本**彻底终结阿里云、AWS、GCP 的高昂日志账单。
@@ -32,8 +34,9 @@
 ## 工作原理
 
 ```
-你的应用 ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine
-                                                                        │
+你的应用 ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine（92 天）
+                              │                                         │
+                              └──console.log──▶ Workers Logs（7-30 天） │
                                                                    SQL API ◀── 你
 ```
 
@@ -47,6 +50,18 @@ aepipe 实例
 
 无需外部数据库。Project 和 LogStore 是隐式的，首次写入即创建，通过 SQL 查询发现。
 
+### 双重日志存储
+
+每个写入的数据点同时进入**两个**独立存储层：
+
+| | Analytics Engine（query） | Workers Logs（rawlog） |
+|---|---|---|
+| **数据格式** | 结构化（blobs + doubles） | 原始 JSON 快照 |
+| **保留期** | **92 天** | Free：**7 天** / Paid：**30 天** |
+| **每日限额** | 免费层无硬限 | Free：20 万条/天（超出后降采样至 1%） |
+| **查询方式** | SQL，通过 `/query` 端点 | Telemetry API，通过 `/rawlog` 端点 |
+| **适用场景** | 指标聚合、仪表盘、趋势分析 | 调试排查、审计追踪、原始请求还原 |
+
 ## 部署步骤
 
 ### 1. 安装依赖
@@ -57,12 +72,18 @@ npm install
 
 ### 2. 配置
 
-编辑 `wrangler.toml`，自定义 dataset 名称：
+编辑 `wrangler.toml`：
 
 ```toml
 name = "aepipe"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
 
 [[analytics_engine_datasets]]
 binding = "LOGS"
@@ -73,8 +94,8 @@ dataset = "aepipe"
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN       # 所有 API 操作的鉴权 token
-npx wrangler secret put CF_ACCOUNT_ID     # Cloudflare 账户 ID（查询 API 使用）
-npx wrangler secret put CF_API_TOKEN      # CF API token，需有 Analytics Engine 读取权限
+npx wrangler secret put CF_ACCOUNT_ID     # 你的 Cloudflare 账号 ID
+npx wrangler secret put CF_API_TOKEN      # CF API token（需 Account Analytics Read + Workers Scripts Read 权限）
 ```
 
 ### 4. 部署
@@ -113,7 +134,38 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/ingest 
 - `points` 必须是非空数组，每次请求最多 250 个
 - `event` 缺失或为空的数据点会被静默跳过
 
-### 查询 — `POST /v1/{project}/{logstore}/query`
+### 写入原始日志 — `POST /v1/{project}/{logstore}/log`
+
+将自由格式的日志条目写入 Workers Logs（Free **7 天** / Paid **30 天**）。
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/log \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      { "message": "user login failed", "level": "error", "userId": "u-42", "ip": "1.2.3.4" }
+    ]
+  }'
+```
+
+**响应：** `{ "ok": true, "written": 1 }`
+
+**请求体参数：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `logs[].message` | string | **是** | 日志消息（缺失则跳过） |
+| `logs[].level` | string | 否 | `debug` / `info`（默认）/ `warn` / `error` |
+| `logs[].*` | any | 否 | 任意额外字段，原样保留在 JSON 中 |
+
+**约束：**
+- `logs` 必须是非空数组，每次请求最多 250 条
+- level 映射到 `console.log` / `console.warn` / `console.error` / `console.debug`，便于在 Workers Logs 中按级别过滤
+
+### 结构化查询 — `POST /v1/{project}/{logstore}/query`
+
+从 Analytics Engine 查询结构化日志数据（最长 **92 天**）。
 
 ```bash
 curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/query \
@@ -125,6 +177,31 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/query \
 ```
 
 Worker 会自动注入 `blob1 = '{project}' AND blob2 = '{logstore}'` 到 WHERE 子句，防止跨租户读取。
+
+### 原始日志 — `POST /v1/{project}/{logstore}/rawlog`
+
+通过 CF Telemetry REST API 从 Workers Logs 查询原始 JSON 快照（Free **7 天** / Paid **30 天**）。
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/rawlog \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 50,
+    "start": "2026-03-20T00:00:00Z",
+    "end": "2026-03-20T12:00:00Z"
+  }'
+```
+
+**请求体参数：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `limit` | number | 50 | 最大返回条数（上限 200） |
+| `start` | ISO 时间字符串 | 6 小时前 | 查询起始时间 |
+| `end` | ISO 时间字符串 | 当前时间 | 查询截止时间 |
+
+**响应：** `{ "logs": [{ "timestamp": "...", "level": "log", "data": { ... } }], "count": 1 }`
 
 ### 列出项目 — `GET /v1/projects`
 
@@ -156,6 +233,30 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | `blob5`–`blob20` | 用户 `blobs[0..15]` | 最多 16 个额外 blob，每个 <=16KB |
 | `double1`–`double20` | 用户 `doubles[0..19]` | 最多 20 个 double |
 
+## 平台限制与计费
+
+aepipe 运行在 Cloudflare 基础设施上，以下是需要了解的平台限制：
+
+### Cloudflare Free 计划
+
+| 资源 | 限额 | 超出行为 |
+|------|------|----------|
+| Worker 请求数 | 10 万/天 | **请求失败**（429/5XX），UTC 零点重置 |
+| Analytics Engine 保留期 | 92 天 | 到期自动删除 |
+| Workers Logs 保留期 | 7 天 | 到期自动删除 |
+| Workers Logs 日志量 | 20 万条/天 | 超出后自动降采样至 1% |
+
+### Cloudflare Paid 计划（$5/月）
+
+| 资源 | 限额 | 超出行为 |
+|------|------|----------|
+| Worker 请求数 | 含 1000 万次，超出 $0.50/百万 | 按量计费 |
+| Analytics Engine 保留期 | 92 天 | 到期自动删除 |
+| Workers Logs 保留期 | 30 天 | 到期自动删除 |
+| Workers Logs 日志量 | 50 亿条/天 | 超出后自动降采样至 1% |
+
+所有数据（Analytics Engine 和 Workers Logs）到期后**自动清理**，无需手动操作。
+
 ## 错误响应
 
 | 状态码 | 响应体 |
@@ -164,6 +265,16 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 | 401 | `{ "error": "unauthorized" }` |
 | 404 | `{ "error": "not found" }` |
 | 502 | `{ "error": "CF API ..." }` — 上游查询失败 |
+
+## Claude Code Skill
+
+安装 [query-aepipe](skills/query-aepipe/SKILL.md) 技能，让 Claude Code 直接与你的 aepipe 实例交互：
+
+```bash
+npx skills add loadchange/aepipe
+```
+
+该技能提供 Python CLI 客户端，支持所有 API 操作（ingest、query、log、rawlog、列出 projects/logstores）以及高级数据处理（过滤、聚合、时间分桶、SQLite 导出）。
 
 ## 本地开发
 
@@ -175,4 +286,4 @@ npm run tail     # 实时查看日志流
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)

@@ -41,8 +41,8 @@ export function jsonResponse(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: corsHeaders() });
 }
 
-import { handleIngest } from "./ingest";
-import { handleQuery, handleListProjects, handleListLogStores } from "./query";
+import { handleIngest, handleLog } from "./ingest";
+import { handleQuery, handleListProjects, handleListLogStores, handleRawLog } from "./query";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -91,6 +91,12 @@ export default {
       }
       if (action === "query") {
         return handleQuery(request, env, project, logstore);
+      }
+      if (action === "log") {
+        return handleLog(request, env, project, logstore);
+      }
+      if (action === "rawlog") {
+        return handleRawLog(request, env, project, logstore);
       }
     }
 

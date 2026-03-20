@@ -1,75 +1,99 @@
 export interface Env {
   LOGS: AnalyticsEngineDataset;
-  INGEST_TOKEN: string;
+  ADMIN_TOKEN: string;
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
 }
 
-interface DataPoint {
+export interface DataPoint {
   event: string;
   level?: string;
-  index?: string;
   blobs?: string[];
   doubles?: number[];
 }
 
-interface IngestPayload {
+export interface IngestPayload {
   points: DataPoint[];
 }
 
-function authorize(request: Request, env: Env): boolean {
+const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export function authorize(request: Request, env: Env): boolean {
   const header = request.headers.get("Authorization");
   if (!header) return false;
   const [scheme, token] = header.split(" ", 2);
-  return scheme === "Bearer" && token === env.INGEST_TOKEN;
+  return scheme === "Bearer" && token === env.ADMIN_TOKEN;
 }
 
-function mapDataPoint(p: DataPoint): AnalyticsEngineDataPoint {
-  // blob1 = event, blob2 = level, blob3+ = extra blobs
-  const blobs: string[] = [p.event, p.level ?? "info", ...(p.blobs ?? [])];
+export function validateName(name: string): boolean {
+  return NAME_RE.test(name);
+}
+
+function corsHeaders(): HeadersInit {
   return {
-    indexes: p.index ? [p.index] : [],
-    blobs,
-    doubles: p.doubles ?? [],
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
   };
 }
+
+export function jsonResponse(body: unknown, status = 200): Response {
+  return Response.json(body, { status, headers: corsHeaders() });
+}
+
+import { handleIngest } from "./ingest";
+import { handleQuery, handleListProjects, handleListLogStores } from "./query";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204 });
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    if (request.method !== "POST") {
-      return Response.json({ error: "method not allowed" }, { status: 405 });
+    const url = new URL(request.url);
+    const parts = url.pathname.split("/").filter(Boolean);
+    // parts[0] = "v1", parts[1..] = route segments
+
+    if (parts[0] !== "v1") {
+      return jsonResponse({ error: "not found" }, 404);
     }
 
     if (!authorize(request, env)) {
-      return Response.json({ error: "unauthorized" }, { status: 401 });
+      return jsonResponse({ error: "unauthorized" }, 401);
     }
 
-    let payload: IngestPayload;
-    try {
-      payload = await request.json<IngestPayload>();
-    } catch {
-      return Response.json({ error: "invalid json" }, { status: 400 });
+    // GET /v1/projects
+    if (parts.length === 2 && parts[1] === "projects" && request.method === "GET") {
+      return handleListProjects(env);
     }
 
-    if (!Array.isArray(payload.points) || payload.points.length === 0) {
-      return Response.json({ error: "points must be a non-empty array" }, { status: 400 });
-    }
-
-    if (payload.points.length > 250) {
-      return Response.json({ error: "max 250 points per request" }, { status: 400 });
-    }
-
-    let written = 0;
-    for (const point of payload.points) {
-      if (typeof point.event !== "string" || point.event === "") {
-        continue;
+    // GET /v1/{project}/logstores
+    if (parts.length === 3 && parts[2] === "logstores" && request.method === "GET") {
+      const project = parts[1];
+      if (!validateName(project)) {
+        return jsonResponse({ error: "invalid project name" }, 400);
       }
-      env.LOGS.writeDataPoint(mapDataPoint(point));
-      written++;
+      return handleListLogStores(env, project);
     }
 
-    return Response.json({ ok: true, written });
+    // POST /v1/{project}/{logstore}/{action}
+    if (parts.length === 4 && request.method === "POST") {
+      const [, project, logstore, action] = parts;
+      if (!validateName(project)) {
+        return jsonResponse({ error: "invalid project name" }, 400);
+      }
+      if (!validateName(logstore)) {
+        return jsonResponse({ error: "invalid logstore name" }, 400);
+      }
+
+      if (action === "ingest") {
+        return handleIngest(request, env, project, logstore);
+      }
+      if (action === "query") {
+        return handleQuery(request, env, project, logstore);
+      }
+    }
+
+    return jsonResponse({ error: "not found" }, 404);
   },
 };

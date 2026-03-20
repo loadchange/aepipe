@@ -1,6 +1,6 @@
 # aepipe
 
-A lightweight Cloudflare Worker that ingests structured events over HTTP and writes them to [Workers Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/).
+A lightweight Cloudflare Worker for **multi-tenant** structured event ingestion and querying via [Workers Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/).
 
 Send JSON from any backend, query with SQL — no log aggregation stack required.
 
@@ -11,6 +11,16 @@ Your App ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()─�
                                                                         │
                                                                    SQL API ◀── You
 ```
+
+Events are scoped by **project** and **logstore** — one deployment serves many teams/apps:
+
+```
+aepipe instance
+  └── Project (top-level tenant)
+        └── LogStore (log category within a project)
+```
+
+No external database. Projects and logstores are implicit, created on first write, discovered via SQL queries.
 
 ## Setup
 
@@ -31,16 +41,16 @@ compatibility_date = "2025-04-01"
 
 [[analytics_engine_datasets]]
 binding = "LOGS"
-dataset = "your-dataset-name"  # change this
+dataset = "aepipe"
 ```
 
-### 3. Set the ingest token
+### 3. Set secrets
 
 ```bash
-npx wrangler secret put INGEST_TOKEN
+npx wrangler secret put ADMIN_TOKEN       # shared auth token for all API operations
+npx wrangler secret put CF_ACCOUNT_ID     # Cloudflare account ID (for query API)
+npx wrangler secret put CF_API_TOKEN      # CF API token with Analytics Engine read permission
 ```
-
-This shared secret protects the endpoint from unauthorized writes.
 
 ### 4. Deploy
 
@@ -48,99 +58,87 @@ This shared secret protects the endpoint from unauthorized writes.
 npm run deploy
 ```
 
-## Usage
+## API
 
-### Write data points
+All endpoints require `Authorization: Bearer <ADMIN_TOKEN>`.
+
+Project and logstore names must match `^[a-zA-Z0-9_-]{1,64}$`.
+
+### Ingest — `POST /v1/{project}/{logstore}/ingest`
 
 ```bash
-curl -X POST https://aepipe.<your-subdomain>.workers.dev \
-  -H "Authorization: Bearer <INGEST_TOKEN>" \
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/ingest \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "points": [
       {
-        "event": "order_placed",
+        "event": "GET /api/users",
         "level": "info",
-        "index": "session-abc",
-        "blobs": ["user-42", "us-east"],
-        "doubles": [99.95, 3]
+        "blobs": ["200", "us-east"],
+        "doubles": [42.5]
       }
     ]
   }'
 ```
 
-**Response:**
-
-```json
-{ "ok": true, "written": 1 }
-```
-
-### Query with SQL
-
-Create an [API token](https://dash.cloudflare.com/profile/api-tokens) with **Account Analytics Read** permission, then:
-
-```bash
-curl "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/analytics_engine/sql" \
-  -H "Authorization: Bearer <CF_API_TOKEN>" \
-  -d "SELECT timestamp, blob1 AS event, blob2 AS level, double1
-      FROM your-dataset-name
-      WHERE blob2 = 'error'
-      AND timestamp >= NOW() - INTERVAL '1' HOUR
-      ORDER BY timestamp DESC
-      LIMIT 50"
-```
-
-## Data point schema
-
-| Field | Type | Required | Maps to |
-|-------|------|----------|---------|
-| `event` | string | **yes** | `blob1` |
-| `level` | string | no (default `"info"`) | `blob2` |
-| `index` | string | no | `index1` (sampling key) |
-| `blobs` | string[] | no | `blob3`, `blob4`, ... |
-| `doubles` | number[] | no | `double1`, `double2`, ... |
-
-**Analytics Engine limits:** up to 20 blobs (each ≤ 16 KB), 20 doubles, 1 index (≤ 96 bytes).
-
-## API reference
-
-### `POST /`
-
-Writes data points to Analytics Engine.
-
-**Headers:**
-- `Authorization: Bearer <INGEST_TOKEN>` (required)
-- `Content-Type: application/json`
-
-**Body:**
-
-```json
-{
-  "points": [
-    {
-      "event": "string (required)",
-      "level": "string",
-      "index": "string",
-      "blobs": ["string"],
-      "doubles": [0.0]
-    }
-  ]
-}
-```
+**Response:** `{ "ok": true, "written": 1 }`
 
 **Constraints:**
-- `points` must be a non-empty array
-- Max 250 points per request
+- `points` must be a non-empty array, max 250 per request
 - Points with missing or empty `event` are silently skipped
 
-**Responses:**
+### Query — `POST /v1/{project}/{logstore}/query`
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/query \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sql": "SELECT blob3 AS event, blob4 AS level FROM aepipe WHERE timestamp > NOW() - INTERVAL '\''1'\'' HOUR ORDER BY timestamp DESC LIMIT 100"
+  }'
+```
+
+The worker auto-injects `blob1 = '{project}' AND blob2 = '{logstore}'` into the WHERE clause — users cannot read across tenant boundaries.
+
+### List projects — `GET /v1/projects`
+
+```bash
+curl https://aepipe.<subdomain>.workers.dev/v1/projects \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
+
+**Response:** `{ "projects": ["my-app", "backend-svc"] }`
+
+### List logstores — `GET /v1/{project}/logstores`
+
+```bash
+curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
+
+**Response:** `{ "logstores": ["access-log", "error-log"] }`
+
+## Data point mapping
+
+| AE Field | Content | Notes |
+|----------|---------|-------|
+| `index1` | `{project}/{logstore}` | Sampling key |
+| `blob1` | project name | Tenant filter |
+| `blob2` | logstore name | Sub-tenant filter |
+| `blob3` | event (required) | User's event string |
+| `blob4` | level | Defaults to "info" |
+| `blob5`–`blob20` | user `blobs[0..15]` | Max 16 extra blobs, ≤16KB each |
+| `double1`–`double20` | user `doubles[0..19]` | Up to 20 doubles |
+
+## Error responses
 
 | Status | Body |
 |--------|------|
-| 200 | `{ "ok": true, "written": N }` |
-| 400 | `{ "error": "invalid json" }` or `{ "error": "points must be a non-empty array" }` or `{ "error": "max 250 points per request" }` |
+| 400 | `{ "error": "..." }` — invalid JSON, bad name, empty points, etc. |
 | 401 | `{ "error": "unauthorized" }` |
-| 405 | `{ "error": "method not allowed" }` |
+| 404 | `{ "error": "not found" }` |
+| 502 | `{ "error": "CF API ..." }` — upstream query failure |
 
 ## Development
 

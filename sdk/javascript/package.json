@@ -1,0 +1,32 @@
+{
+  "name": "aepipe-sdk",
+  "version": "0.1.0",
+  "description": "JavaScript SDK for aepipe — multi-tenant log ingestion and query (browser & Node.js)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run --coverage",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3",
+    "tsup": "^8",
+    "typescript": "^5",
+    "vitest": "^3"
+  },
+  "license": "MIT"
+}

@@ -3,6 +3,8 @@ export interface Env {
   ADMIN_TOKEN: string;
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  /** Optional D1 binding for extended payload storage. */
+  DB?: D1Database;
 }
 
 export interface DataPoint {
@@ -10,6 +12,10 @@ export interface DataPoint {
   level?: string;
   blobs?: string[];
   doubles?: number[];
+  /** Extended JSON data stored in D1. Requires D1 binding on the server. */
+  payload?: Record<string, unknown>;
+  /** Payload TTL in seconds. Default: 90 days (matches AE retention). */
+  ttl?: number;
 }
 
 export interface IngestPayload {
@@ -42,7 +48,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
 }
 
 import { handleIngest, handleLog } from "./ingest";
-import { handleQuery, handleListProjects, handleListLogStores, handleRawLog } from "./query";
+import { handleQuery, handleListProjects, handleListLogStores, handleRawLog, handleDetail } from "./query";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -97,6 +103,9 @@ export default {
       }
       if (action === "rawlog") {
         return handleRawLog(request, env, project, logstore);
+      }
+      if (action === "detail") {
+        return handleDetail(request, env, project, logstore);
       }
     }
 

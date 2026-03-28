@@ -39,9 +39,16 @@ from aepipe import DataPoint
 result = client.ingest("myapp", "backend", [
     DataPoint(event="user_login"),
     DataPoint(event="api_error", level="error", blobs=["GET /api"], doubles=[1.23]),
+    # With D1 payload — large data stored separately, linked via UUID
+    DataPoint(
+        event="unhandled_exception",
+        level="error",
+        payload={"stack": "Error: ...\n  at ...", "request": {"url": "/api/users"}},
+        ttl=604800,  # 7 days
+    ),
 ])
 print(result.ok)       # True
-print(result.written)  # 2
+print(result.written)  # 3
 ```
 
 ### `log(project, logstore, logs) -> LogResult`
@@ -98,6 +105,29 @@ for entry in result.logs:
 print(f"total: {result.count}")
 ```
 
+### `detail(project, logstore, ref_ids) -> DetailResult`
+
+Fetch extended payloads from D1 by ref_id. Requires D1 binding on the server.
+
+| Parameter  | Type         | Description                             |
+|------------|--------------|----------------------------------------|
+| `project`  | `str`        | Project name                            |
+| `logstore` | `str`        | Logstore name                           |
+| `ref_ids`  | `list[str]`  | UUID references from AE blob5 (max 100) |
+
+```python
+# 1. Query AE to get ref_ids
+ae_result = client.query("myapp", "backend",
+    "SELECT blob5 as ref_id, blob3 as event FROM aepipe WHERE blob5 != '' LIMIT 10"
+)
+
+# 2. Fetch full payloads from D1
+ref_ids = [r["ref_id"] for r in ae_result.data.get("data", [])]
+details = client.detail("myapp", "backend", ref_ids)
+for entry in details.results:
+    print(entry.ref_id, entry.payload)  # {"stack": "...", "request": {...}}
+```
+
 ### `list_projects() -> ListResult`
 
 List all projects that have written data.
@@ -120,12 +150,36 @@ print(result.items)  # ["backend", "frontend", ...]
 
 ### `DataPoint`
 
-| Field     | Type            | Default  | Description                     |
-|-----------|-----------------|----------|---------------------------------|
-| `event`   | `str`           | required | Event name (non-empty)          |
-| `level`   | `str`           | `"info"` | Log level                       |
-| `blobs`   | `list[str]`     | `[]`     | String metadata (max 16 extra)  |
-| `doubles` | `list[float]`   | `[]`     | Numeric metrics (max 20)        |
+| Field     | Type              | Default  | AE Mapping     | Description                     |
+|-----------|-------------------|----------|-----------------|---------------------------------|
+| `event`   | `str`             | required | blob3           | Event name (non-empty)          |
+| `level`   | `str`             | `"info"` | blob4           | Log level                       |
+| `blobs`   | `list[str]`       | `[]`     | blob6 – blob20  | String metadata for grouping/filtering (max **15** items) |
+| `doubles` | `list[float]`     | `[]`     | double1 – double20 | Numeric metrics for aggregation (max **20** items) |
+| `payload` | `dict[str, Any]`  | `None`   | D1 (via blob5 ref_id) | Extended data stored in D1. Requires D1 binding on server |
+| `ttl`     | `int`             | 7776000  |                 | Payload TTL in seconds (default: 90 days) |
+
+> **blobs vs doubles — how to choose?**
+>
+> - **blobs** (string): Used for **grouping** (`GROUP BY`) and **filtering** (`WHERE`). Not aggregatable. Examples: URL path, user ID, region, error message.
+> - **doubles** (number): 64-bit IEEE 754 floats. Can be **aggregated** with `SUM`, `AVG`, `QUANTILE`, `MIN`, `MAX`. Examples: response time, request size, error count.
+
+## Cloudflare Analytics Engine Limits
+
+These are hard limits enforced by Cloudflare. Exceeding blob size limits causes **silent data truncation** — the write succeeds but data is lost, making it impossible to observe anomalies. The SDK validates these limits client-side and raises `ValidationError` before sending.
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Blobs per data point | 20 total | 5 used by system (project, logstore, event, level, ref_id), **15 available to user** |
+| Doubles per data point | 20 | All available to user |
+| **Total blob size per data point** | **16 KB** | Sum of all blob byte lengths (UTF-8), including system blobs. **Exceeding = silent truncation** |
+| Index size | 96 bytes | Index = `{project}/{logstore}`, auto-managed |
+| Data points per request | 250 | Per `ingest()` / `log()` call |
+| Data retention | **3 months** | Data auto-expires after 3 months |
+
+> **Tip:** If your data is large (e.g., full stack traces, request dumps), use the `payload` field instead of blobs. Payloads are stored in Cloudflare D1 with no 16 KB limit, linked to AE via a UUID in blob5.
+
+See: [Cloudflare Analytics Engine Limits](https://developers.cloudflare.com/analytics/analytics-engine/limits/)
 
 ### `LogEntry`
 
@@ -142,6 +196,8 @@ print(result.items)  # ["backend", "frontend", ...]
 | `IngestResult`  | `ok: bool`, `written: int`    |
 | `LogResult`     | `ok: bool`, `written: int`    |
 | `QueryResult`   | `data: Any`                   |
+| `DetailResult`  | `results: list[DetailEntry]`  |
+| `DetailEntry`   | `ref_id: str`, `payload: dict`, `created_at: int`, `expires_at: int` |
 | `RawLogResult`  | `logs: list[RawLogEntry]`, `count: int` |
 | `RawLogEntry`   | `timestamp: str`, `level: str`, `data: Any` |
 | `ListResult`    | `items: list[str]`            |

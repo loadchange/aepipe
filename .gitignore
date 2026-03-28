@@ -2,6 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+wrangler.toml
 __pycache__/
 *.pyc
 *.egg-info/

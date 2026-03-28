@@ -24,3 +24,11 @@ head_sampling_rate = 1
 [[analytics_engine_datasets]]
 binding = "LOGS"
 dataset = "aepipe"
+
+# Uncomment to enable D1 payload storage (extended data beyond AE's 16KB blob limit):
+# 1. Create the database:  npx wrangler d1 create aepipe-payloads
+# 2. Uncomment the block below and paste your database_id
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "aepipe-payloads"
+# database_id = "your-database-id-here"

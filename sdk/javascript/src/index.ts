@@ -2,6 +2,8 @@ export { Aepipe, AepipeError, ValidationError } from "./client";
 export type {
   AepipeOptions,
   DataPoint,
+  DetailEntry,
+  DetailResult,
   IngestResult,
   ListResult,
   LogEntry,

@@ -8,6 +8,8 @@ from urllib.error import HTTPError
 
 from .types import (
     DataPoint,
+    DetailEntry,
+    DetailResult,
     IngestResult,
     ListResult,
     LogEntry,
@@ -19,6 +21,12 @@ from .types import (
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MAX_BATCH = 250
+# Cloudflare Analytics Engine limit: total blob size per data point is 16 KB.
+# See: https://developers.cloudflare.com/analytics/analytics-engine/limits/
+_MAX_BLOB_BYTES = 16 * 1024
+# Cloudflare Analytics Engine limit: index must not exceed 96 bytes.
+# Index is formatted as "{project}/{logstore}".
+_MAX_INDEX_BYTES = 96
 
 
 class AepipeError(Exception):
@@ -39,12 +47,42 @@ def _validate_name(name: str, label: str) -> None:
         raise ValidationError(f"invalid {label}: {name!r}")
 
 
+def _validate_index_size(project: str, logstore: str) -> None:
+    """Index is ``{project}/{logstore}`` — Cloudflare caps it at 96 bytes."""
+    index = f"{project}/{logstore}"
+    size = len(index.encode("utf-8"))
+    if size > _MAX_INDEX_BYTES:
+        raise ValidationError(
+            f'index "{index}" is {size} bytes, exceeds the 96-byte '
+            f"Cloudflare Analytics Engine limit. Use shorter names."
+        )
+
+
+def _validate_blob_size(
+    project: str, logstore: str, p: DataPoint, idx: int
+) -> None:
+    """All blobs in a data point (including system blobs) must total <= 16 KB."""
+    ref_id_est = "00000000-0000-0000-0000-000000000000" if p.payload else ""
+    all_blobs = [project, logstore, p.event, p.level, ref_id_est, *p.blobs]
+    total = sum(len(b.encode("utf-8")) for b in all_blobs)
+    if total > _MAX_BLOB_BYTES:
+        raise ValidationError(
+            f"points[{idx}]: total blob size {total} bytes exceeds the 16 KB "
+            f"({_MAX_BLOB_BYTES} bytes) Cloudflare Analytics Engine limit. "
+            f"Reduce blob content to prevent silent data truncation."
+        )
+
+
 def _serialize_point(p: DataPoint) -> dict[str, Any]:
     d: dict[str, Any] = {"event": p.event, "level": p.level}
     if p.blobs:
         d["blobs"] = p.blobs
     if p.doubles:
         d["doubles"] = p.doubles
+    if p.payload is not None:
+        d["payload"] = p.payload
+    if p.ttl is not None:
+        d["ttl"] = p.ttl
     return d
 
 
@@ -71,8 +109,19 @@ class Aepipe:
         """Write structured event points (max 250 per call)."""
         _validate_name(project, "project")
         _validate_name(logstore, "logstore")
+        _validate_index_size(project, logstore)
         if len(points) > _MAX_BATCH:
             raise ValidationError(f"max {_MAX_BATCH} points per request, got {len(points)}")
+        for i, p in enumerate(points):
+            if len(p.blobs) > 15:
+                raise ValidationError(
+                    f"points[{i}]: max 15 user blobs (blob6-blob20), got {len(p.blobs)}"
+                )
+            if len(p.doubles) > 20:
+                raise ValidationError(
+                    f"points[{i}]: max 20 doubles, got {len(p.doubles)}"
+                )
+            _validate_blob_size(project, logstore, p, i)
         body = {"points": [_serialize_point(p) for p in points]}
         resp = self._post(f"/v1/{project}/{logstore}/ingest", body)
         return IngestResult(ok=resp["ok"], written=resp["written"])
@@ -142,6 +191,33 @@ class Aepipe:
             for e in resp.get("logs", [])
         ]
         return RawLogResult(logs=entries, count=resp.get("count", len(entries)))
+
+    # --- detail ---
+
+    def detail(
+        self,
+        project: str,
+        logstore: str,
+        ref_ids: list[str],
+    ) -> DetailResult:
+        """Fetch D1 payloads by ref_id (max 100 per call)."""
+        _validate_name(project, "project")
+        _validate_name(logstore, "logstore")
+        if not ref_ids:
+            return DetailResult(results=[])
+        if len(ref_ids) > 100:
+            raise ValidationError(f"max 100 ref_ids per request, got {len(ref_ids)}")
+        resp = self._post(f"/v1/{project}/{logstore}/detail", {"ref_ids": ref_ids})
+        entries = [
+            DetailEntry(
+                ref_id=r["ref_id"],
+                payload=r["payload"],
+                created_at=r["created_at"],
+                expires_at=r["expires_at"],
+            )
+            for r in resp.get("results", [])
+        ]
+        return DetailResult(results=entries)
 
     # --- list ---
 

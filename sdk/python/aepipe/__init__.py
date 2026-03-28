@@ -1,6 +1,8 @@
 from .client import Aepipe, AepipeError, ValidationError
 from .types import (
     DataPoint,
+    DetailEntry,
+    DetailResult,
     IngestResult,
     ListResult,
     LogEntry,
@@ -15,6 +17,8 @@ __all__ = [
     "AepipeError",
     "ValidationError",
     "DataPoint",
+    "DetailEntry",
+    "DetailResult",
     "IngestResult",
     "ListResult",
     "LogEntry",

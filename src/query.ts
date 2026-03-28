@@ -1,5 +1,6 @@
 import type { Env } from "./index";
 import { jsonResponse } from "./index";
+import { readPayloads } from "./store";
 
 async function cfAnalyticsQuery(
   env: Env,
@@ -213,4 +214,41 @@ export async function handleListLogStores(
   const rows = (result.data as { data?: { blob2: string }[] })?.data ?? [];
   const logstores = [...new Set(rows.map((r) => r.blob2))];
   return jsonResponse({ logstores });
+}
+
+export async function handleDetail(
+  request: Request,
+  env: Env,
+  _project: string,
+  _logstore: string,
+): Promise<Response> {
+  if (!env.DB) {
+    return jsonResponse({ error: "D1 payload storage is not configured" }, 501);
+  }
+
+  let body: { ref_ids?: string[] };
+  try {
+    body = await request.json<typeof body>();
+  } catch {
+    return jsonResponse({ error: "invalid json" }, 400);
+  }
+
+  if (!Array.isArray(body.ref_ids) || body.ref_ids.length === 0) {
+    return jsonResponse({ error: "ref_ids must be a non-empty array" }, 400);
+  }
+
+  if (body.ref_ids.length > 100) {
+    return jsonResponse({ error: "max 100 ref_ids per request" }, 400);
+  }
+
+  const rows = await readPayloads(env.DB, body.ref_ids);
+
+  const results = rows.map((row) => ({
+    ref_id: row.ref_id,
+    payload: JSON.parse(row.payload),
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+  }));
+
+  return jsonResponse({ results });
 }

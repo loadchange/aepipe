@@ -22,7 +22,7 @@ npm run deploy   # Deploy to Cloudflare Workers
 npm run tail     # Stream live logs from deployed worker
 ```
 
-No test suite or linter is configured.
+No linter is configured. SDK tests exist (see below).
 
 ## Architecture
 
@@ -95,3 +95,28 @@ When D1 is configured, data points with a `payload` field get their payload stor
 - User can specify `ttl` (seconds) per data point
 - Every D1 read/write first cleans up expired rows (`DELETE ... WHERE expires_at <= now LIMIT 1000`)
 - Table and index are auto-created on first D1 access (lazy init)
+
+## SDKs
+
+Official SDKs in `sdk/` directory with full type safety and client-side validation:
+
+| SDK | Path | Install | Tests |
+|-----|------|---------|-------|
+| JavaScript/TypeScript | `sdk/javascript/` | `npm install aepipe-sdk` | `cd sdk/javascript && npx vitest run` |
+| Python | `sdk/python/` | `pip install aepipe-sdk` | `cd sdk/python && python -m pytest tests/test_client.py` |
+
+Both SDKs validate AE limits client-side: blob count (max 15 user blobs), total blob size (16 KB), index size (96 bytes), batch size (250), and ref_id count for detail queries (100).
+
+### SDK Integration Tests
+
+Integration tests run against a live aepipe instance. Set environment variables before running:
+
+```bash
+# JavaScript
+AEPIPE_URL=https://... AEPIPE_TOKEN=... npx vitest run src/__tests__/integration.test.ts
+
+# Python
+AEPIPE_URL=https://... AEPIPE_TOKEN=... python tests/test_integration.py
+```
+
+**Never commit `AEPIPE_URL` or `AEPIPE_TOKEN` to the repository.**

@@ -35,8 +35,9 @@ In 2026, log services shouldn't be the silent assassin in your monthly cloud bil
 
 ```
 Your App ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine (92 days)
-                              │                                         │
-                              └──console.log──▶ Workers Logs (7-30 days)│
+                              │                    │                      │
+                              │                    └──payload──▶ D1 (configurable TTL)
+                              └──console.log──▶ Workers Logs (7-30 days) │
                                                                    SQL API ◀── You
 ```
 
@@ -48,7 +49,7 @@ aepipe instance
         └── LogStore (log category within a project)
 ```
 
-No external database. Projects and logstores are implicit, created on first write, discovered via SQL queries.
+No external database required. Projects and logstores are implicit, created on first write, discovered via SQL queries. Optional **Cloudflare D1** integration extends storage capacity beyond AE's 16 KB blob limit.
 
 ### Dual log storage
 
@@ -90,7 +91,27 @@ binding = "LOGS"
 dataset = "aepipe"
 ```
 
-### 3. Set secrets
+### 3. (Optional) Enable D1 payload storage
+
+D1 extends your log capacity beyond AE's 16 KB blob limit. Large payloads (stack traces, request dumps) are stored in D1 and linked to AE via a UUID.
+
+```bash
+# Create the D1 database
+npx wrangler d1 create aepipe-payloads
+```
+
+Then uncomment the `[[d1_databases]]` block in `wrangler.toml` and paste your `database_id`:
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "aepipe-payloads"
+database_id = "your-database-id-here"
+```
+
+The table and indexes are auto-created on first use. No manual migration needed.
+
+### 4. Set secrets
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN       # shared auth token for all API operations
@@ -98,7 +119,7 @@ npx wrangler secret put CF_ACCOUNT_ID     # your Cloudflare account ID
 npx wrangler secret put CF_API_TOKEN      # CF API token (Account Analytics Read + Workers Scripts Read)
 ```
 
-### 4. Deploy
+### 5. Deploy
 
 ```bash
 npm run deploy
@@ -123,16 +144,35 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/ingest 
         "level": "info",
         "blobs": ["200", "us-east"],
         "doubles": [42.5]
+      },
+      {
+        "event": "unhandled_exception",
+        "level": "error",
+        "payload": { "stack": "Error: ...\n  at ...", "request": { "url": "/api/users" } },
+        "ttl": 604800
       }
     ]
   }'
 ```
 
-**Response:** `{ "ok": true, "written": 1 }`
+**Response:** `{ "ok": true, "written": 2 }`
+
+**Request body — `points[]` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `event` | string | **required** | Event name (non-empty) |
+| `level` | string | `"info"` | Log level |
+| `blobs` | string[] | `[]` | String metadata for grouping/filtering (max **15**) |
+| `doubles` | number[] | `[]` | Numeric metrics for aggregation (max **20**) |
+| `payload` | object | | Extended data stored in D1 (requires D1 binding). No 16 KB limit. |
+| `ttl` | number | 7776000 | Payload TTL in seconds (default: 90 days) |
 
 **Constraints:**
 - `points` must be a non-empty array, max 250 per request
 - Points with missing or empty `event` are silently skipped
+- When `payload` is set and D1 is configured, the payload is stored in D1 with a UUID reference in AE `blob5`
+- When `payload` is set but D1 is **not** configured, the payload is silently ignored
 
 ### Write raw log — `POST /v1/{project}/{logstore}/log`
 
@@ -203,6 +243,42 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/rawlog 
 
 **Response:** `{ "logs": [{ "timestamp": "...", "level": "log", "data": { ... } }], "count": 1 }`
 
+### Fetch D1 payloads — `POST /v1/{project}/{logstore}/detail`
+
+Retrieve extended payloads from D1 by ref_id. Requires D1 binding on the server.
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/detail \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ref_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+  }'
+```
+
+**Request body:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ref_ids` | string[] | UUID references from AE blob5 (max 100 per request) |
+
+**Response:**
+
+```json
+{
+  "results": [
+    {
+      "ref_id": "550e8400-e29b-41d4-a716-446655440000",
+      "payload": { "stack": "Error: ...", "request": { "url": "/api/users" } },
+      "created_at": 1711584000000,
+      "expires_at": 1719360000000
+    }
+  ]
+}
+```
+
+Returns `501` if D1 is not configured.
+
 ### List projects — `GET /v1/projects`
 
 ```bash
@@ -225,13 +301,41 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 
 | AE Field | Content | Notes |
 |----------|---------|-------|
-| `index1` | `{project}/{logstore}` | Sampling key |
+| `index1` | `{project}/{logstore}` | Sampling key (max 96 bytes) |
 | `blob1` | project name | Tenant filter |
 | `blob2` | logstore name | Sub-tenant filter |
 | `blob3` | event (required) | User's event string |
 | `blob4` | level | Defaults to "info" |
-| `blob5`-`blob20` | user `blobs[0..15]` | Max 16 extra blobs, <=16KB each |
-| `double1`-`double20` | user `doubles[0..19]` | Up to 20 doubles |
+| `blob5` | ref_id (UUID) | D1 payload reference, empty string if no payload |
+| `blob6`–`blob20` | user `blobs[0..14]` | Max **15** extra blobs |
+| `double1`–`double20` | user `doubles[0..19]` | Up to 20 doubles |
+
+> **Important:** All blobs in a data point share a **16 KB total size limit** (sum of all blob byte lengths, UTF-8). Exceeding this causes **silent data truncation** by Cloudflare. Use `payload` for large data instead.
+
+## D1 payload storage (optional)
+
+Analytics Engine enforces a **16 KB total blob size limit** per data point. Exceeding it causes **silent data truncation** — the write succeeds but data is lost. For large payloads (stack traces, request/response dumps, full error contexts), use the `payload` field instead.
+
+When D1 is configured, data points with a `payload` field get their payload stored in **Cloudflare D1** (SQLite-based serverless database), linked to AE via a UUID in `blob5`. This gives you unlimited payload size with a unified query experience:
+
+1. **Ingest** with `payload` — aepipe generates a UUID, stores the payload in D1, writes the UUID to AE `blob5`
+2. **Query** AE to find events — `SELECT blob5 as ref_id FROM aepipe WHERE blob5 != ''`
+3. **Detail** fetch — pass `ref_ids` to `/detail` endpoint to retrieve full payloads from D1
+
+**Expiration:** Payloads have a configurable TTL (default: 90 days, matching AE retention). Expired payloads are automatically cleaned up on every D1 read/write operation.
+
+**Without D1:** If D1 is not configured, the `payload` field is silently ignored during ingest, and the `/detail` endpoint returns `501`.
+
+## SDKs
+
+Official SDKs with full type safety, client-side validation (blob size limits, index size, batch constraints), and support for all API features including D1 payload storage.
+
+| SDK | Install | Docs |
+|-----|---------|------|
+| **JavaScript/TypeScript** | `npm install aepipe-sdk` | [README](sdk/javascript/README.md) |
+| **Python** | `pip install aepipe-sdk` | [README](sdk/python/README.md) |
+
+Both SDKs validate Cloudflare's hard limits **before** sending requests, preventing silent data truncation.
 
 ## Limits & pricing
 

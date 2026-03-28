@@ -35,8 +35,9 @@
 
 ```
 你的应用 ──POST JSON──▶ aepipe (CF Worker) ──writeDataPoint()──▶ Analytics Engine（92 天）
-                              │                                         │
-                              └──console.log──▶ Workers Logs（7-30 天） │
+                              │                    │                      │
+                              │                    └──payload──▶ D1（可配置 TTL）
+                              └──console.log──▶ Workers Logs（7-30 天）  │
                                                                    SQL API ◀── 你
 ```
 
@@ -48,7 +49,7 @@ aepipe 实例
         └── LogStore（项目内的日志分类）
 ```
 
-无需外部数据库。Project 和 LogStore 是隐式的，首次写入即创建，通过 SQL 查询发现。
+无需外部数据库。Project 和 LogStore 是隐式的，首次写入即创建，通过 SQL 查询发现。可选的 **Cloudflare D1** 集成可突破 AE 16 KB blob 大小限制，存储大体积数据。
 
 ### 双重日志存储
 
@@ -90,7 +91,27 @@ binding = "LOGS"
 dataset = "aepipe"
 ```
 
-### 3. 设置密钥
+### 3.（可选）启用 D1 扩展存储
+
+D1 可突破 AE 的 16 KB blob 大小限制。大体积数据（堆栈跟踪、请求快照等）存储在 D1 中，通过 UUID 与 AE 关联。
+
+```bash
+# 创建 D1 数据库
+npx wrangler d1 create aepipe-payloads
+```
+
+然后取消 `wrangler.toml` 中 `[[d1_databases]]` 块的注释，并填入你的 `database_id`：
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "aepipe-payloads"
+database_id = "your-database-id-here"
+```
+
+表和索引会在首次使用时自动创建，无需手动迁移。
+
+### 4. 设置密钥
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN       # 所有 API 操作的鉴权 token
@@ -98,7 +119,7 @@ npx wrangler secret put CF_ACCOUNT_ID     # 你的 Cloudflare 账号 ID
 npx wrangler secret put CF_API_TOKEN      # CF API token（需 Account Analytics Read + Workers Scripts Read 权限）
 ```
 
-### 4. 部署
+### 5. 部署
 
 ```bash
 npm run deploy
@@ -123,16 +144,35 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/ingest 
         "level": "info",
         "blobs": ["200", "us-east"],
         "doubles": [42.5]
+      },
+      {
+        "event": "unhandled_exception",
+        "level": "error",
+        "payload": { "stack": "Error: ...\n  at ...", "request": { "url": "/api/users" } },
+        "ttl": 604800
       }
     ]
   }'
 ```
 
-**响应：** `{ "ok": true, "written": 1 }`
+**响应：** `{ "ok": true, "written": 2 }`
+
+**请求体 — `points[]` 字段：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `event` | string | **必填** | 事件名称（非空） |
+| `level` | string | `"info"` | 日志级别 |
+| `blobs` | string[] | `[]` | 用于分组/过滤的字符串元数据（最多 **15** 个） |
+| `doubles` | number[] | `[]` | 用于聚合的数值指标（最多 **20** 个） |
+| `payload` | object | | 存储在 D1 中的扩展数据（需配置 D1），无 16 KB 限制 |
+| `ttl` | number | 7776000 | payload 过期时间，单位秒（默认 90 天） |
 
 **约束：**
 - `points` 必须是非空数组，每次请求最多 250 个
 - `event` 缺失或为空的数据点会被静默跳过
+- 设置 `payload` 且配置了 D1 时，payload 存储在 D1 中，UUID 引用写入 AE `blob5`
+- 设置 `payload` 但**未配置** D1 时，payload 会被静默忽略
 
 ### 写入原始日志 — `POST /v1/{project}/{logstore}/log`
 
@@ -203,6 +243,42 @@ curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/rawlog 
 
 **响应：** `{ "logs": [{ "timestamp": "...", "level": "log", "data": { ... } }], "count": 1 }`
 
+### 查询 D1 扩展数据 — `POST /v1/{project}/{logstore}/detail`
+
+通过 ref_id 从 D1 获取扩展 payload。需要在服务端配置 D1。
+
+```bash
+curl -X POST https://aepipe.<subdomain>.workers.dev/v1/my-app/access-log/detail \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ref_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+  }'
+```
+
+**请求体：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ref_ids` | string[] | AE blob5 中的 UUID 引用（每次最多 100 个） |
+
+**响应：**
+
+```json
+{
+  "results": [
+    {
+      "ref_id": "550e8400-e29b-41d4-a716-446655440000",
+      "payload": { "stack": "Error: ...", "request": { "url": "/api/users" } },
+      "created_at": 1711584000000,
+      "expires_at": 1719360000000
+    }
+  ]
+}
+```
+
+未配置 D1 时返回 `501`。
+
 ### 列出项目 — `GET /v1/projects`
 
 ```bash
@@ -225,13 +301,41 @@ curl https://aepipe.<subdomain>.workers.dev/v1/my-app/logstores \
 
 | AE 字段 | 内容 | 说明 |
 |----------|------|------|
-| `index1` | `{project}/{logstore}` | 采样键 |
+| `index1` | `{project}/{logstore}` | 采样键（最大 96 字节） |
 | `blob1` | 项目名称 | 租户过滤 |
 | `blob2` | LogStore 名称 | 子租户过滤 |
 | `blob3` | event（必填） | 用户的事件字符串 |
 | `blob4` | level | 默认 "info" |
-| `blob5`–`blob20` | 用户 `blobs[0..15]` | 最多 16 个额外 blob，每个 <=16KB |
+| `blob5` | ref_id (UUID) | D1 payload 引用，无 payload 时为空字符串 |
+| `blob6`–`blob20` | 用户 `blobs[0..14]` | 最多 **15** 个额外 blob |
 | `double1`–`double20` | 用户 `doubles[0..19]` | 最多 20 个 double |
+
+> **重要：** 每个数据点的所有 blob 共享 **16 KB 总大小限制**（所有 blob 的 UTF-8 字节长度之和）。超出此限制会导致 Cloudflare **静默截断数据**。大数据请使用 `payload` 字段。
+
+## D1 扩展存储（可选）
+
+Analytics Engine 对每个数据点有 **16 KB 总 blob 大小限制**。超出后 Cloudflare 会**静默截断数据** —— 写入成功但数据丢失。对于大体积 payload（堆栈跟踪、请求/响应快照、完整错误上下文），请使用 `payload` 字段。
+
+配置 D1 后，包含 `payload` 字段的数据点会将 payload 存储到 **Cloudflare D1**（基于 SQLite 的 Serverless 数据库），并通过 `blob5` 中的 UUID 与 AE 关联。payload 大小无限制，查询体验统一：
+
+1. **写入** 带 `payload` 的数据 — aepipe 生成 UUID，将 payload 存入 D1，UUID 写入 AE `blob5`
+2. **查询** AE 找到事件 — `SELECT blob5 as ref_id FROM aepipe WHERE blob5 != ''`
+3. **召回** 完整数据 — 将 `ref_ids` 传给 `/detail` 端点，从 D1 获取完整 payload
+
+**过期机制：** payload 有可配置的 TTL（默认 90 天，与 AE 保留期一致）。过期 payload 在每次 D1 读写操作时自动清理。
+
+**未配置 D1 时：** `payload` 字段在写入时被静默忽略，`/detail` 端点返回 `501`。
+
+## SDK
+
+官方 SDK 提供完整的类型安全、客户端校验（blob 大小限制、索引大小、批量约束），支持所有 API 功能（包括 D1 扩展存储）。
+
+| SDK | 安装 | 文档 |
+|-----|------|------|
+| **JavaScript/TypeScript** | `npm install aepipe-sdk` | [README](sdk/javascript/README.md) |
+| **Python** | `pip install aepipe-sdk` | [README](sdk/python/README.md) |
+
+两个 SDK 均在发送请求前校验 Cloudflare 的硬性限制，防止静默数据截断。
 
 ## 平台限制与计费
 

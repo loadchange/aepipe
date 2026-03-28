@@ -227,6 +227,56 @@ describe("baseUrl", () => {
   });
 });
 
+// ─── detail ──────────────────────────────────────────────────────────
+
+describe("detail", () => {
+  it("sends ref_ids and returns results", async () => {
+    const body = {
+      results: [
+        { ref_id: "abc-123", payload: { stack: "Error..." }, created_at: 1000, expires_at: 2000 },
+      ],
+    };
+    fetchFn = mockFetch(200, body);
+    client = new Aepipe({ baseUrl: BASE, token: TOKEN, fetch: fetchFn });
+
+    const result = await client.detail("p", "s", ["abc-123"]);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].ref_id).toBe("abc-123");
+    expect(result.results[0].payload).toEqual({ stack: "Error..." });
+
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/v1/p/s/detail`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string).ref_ids).toEqual(["abc-123"]);
+  });
+
+  it("returns empty results for empty ref_ids without calling API", async () => {
+    const result = await client.detail("p", "s", []);
+    expect(result.results).toEqual([]);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+// ─── payload / ttl serialization ─────────────────────────────────────
+
+describe("payload and ttl serialization", () => {
+  it("includes payload and ttl in serialized point", async () => {
+    await client.ingest("p", "s", [
+      { event: "e", payload: { key: "value" }, ttl: 3600 },
+    ]);
+    const sent = JSON.parse(lastCall()[1].body as string);
+    expect(sent.points[0].payload).toEqual({ key: "value" });
+    expect(sent.points[0].ttl).toBe(3600);
+  });
+
+  it("omits payload and ttl when not set", async () => {
+    await client.ingest("p", "s", [{ event: "e" }]);
+    const sent = JSON.parse(lastCall()[1].body as string);
+    expect(sent.points[0]).not.toHaveProperty("payload");
+    expect(sent.points[0]).not.toHaveProperty("ttl");
+  });
+});
+
 // ─── validation ───────────────────────────────────────────────────────
 
 describe("validation", () => {
@@ -250,6 +300,53 @@ describe("validation", () => {
   it("rejects log batch > 250", async () => {
     const logs = Array.from({ length: 251 }, () => ({ message: "m" }));
     await expect(client.log("p", "s", logs)).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects more than 15 user blobs", async () => {
+    const blobs = Array.from({ length: 16 }, (_, i) => `b${i}`);
+    await expect(client.ingest("p", "s", [{ event: "e", blobs }])).rejects.toThrow(ValidationError);
+    await expect(client.ingest("p", "s", [{ event: "e", blobs }])).rejects.toThrow(/max 15/);
+  });
+
+  it("allows exactly 15 user blobs", async () => {
+    const blobs = Array.from({ length: 15 }, (_, i) => `b${i}`);
+    await expect(client.ingest("p", "s", [{ event: "e", blobs }])).resolves.toBeDefined();
+  });
+
+  it("rejects detail with > 100 ref_ids", async () => {
+    const ids = Array.from({ length: 101 }, (_, i) => `id-${i}`);
+    await expect(client.detail("p", "s", ids)).rejects.toThrow(ValidationError);
+    await expect(client.detail("p", "s", ids)).rejects.toThrow(/max 100/);
+  });
+
+  it("rejects blob size exceeding 16KB", async () => {
+    const bigBlob = "x".repeat(16 * 1024);
+    await expect(
+      client.ingest("p", "s", [{ event: "e", blobs: [bigBlob] }]),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      client.ingest("p", "s", [{ event: "e", blobs: [bigBlob] }]),
+    ).rejects.toThrow(/16 KB/);
+  });
+
+  it("accounts for ref_id size when payload is set", async () => {
+    // System blobs: "p"(1) + "s"(1) + "e"(1) + "info"(4) + UUID(36) = 43 bytes
+    // So user blob = 16384 - 42 = 16342 should total 16385 > 16384, triggering error
+    const almostFull = "x".repeat(16 * 1024 - 42);
+    await expect(
+      client.ingest("p", "s", [{ event: "e", blobs: [almostFull], payload: { key: "val" } }]),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects index exceeding 96 bytes", async () => {
+    const longName = "a".repeat(64);
+    const longStore = "b".repeat(33); // 64 + 1 + 33 = 98 > 96
+    await expect(
+      client.ingest(longName, longStore, [{ event: "e" }]),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      client.ingest(longName, longStore, [{ event: "e" }]),
+    ).rejects.toThrow(/96-byte/);
   });
 
   it("accepts valid names with dashes and underscores", async () => {

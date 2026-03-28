@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aepipe import Aepipe, AepipeError, DataPoint, LogEntry, ValidationError
+from aepipe import Aepipe, AepipeError, DataPoint, DetailEntry, DetailResult, LogEntry, ValidationError
 
 BASE = "https://aepipe.example.com"
 TOKEN = "test-token"
@@ -290,3 +290,93 @@ class TestValidation:
         sent = json.loads(_capture_request(mock_urlopen).data)
         assert "blobs" not in sent["points"][0]
         assert "doubles" not in sent["points"][0]
+
+    def test_reject_more_than_15_blobs(self):
+        client = Aepipe(BASE, TOKEN)
+        blobs = [f"b{i}" for i in range(16)]
+        with pytest.raises(ValidationError, match="max 15"):
+            client.ingest("p", "s", [DataPoint(event="e", blobs=blobs)])
+
+    @patch("aepipe.client.urlopen")
+    def test_allow_exactly_15_blobs(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(body={"ok": True, "written": 1})
+        client = Aepipe(BASE, TOKEN)
+        blobs = [f"b{i}" for i in range(15)]
+        result = client.ingest("p", "s", [DataPoint(event="e", blobs=blobs)])
+        assert result.written == 1
+
+    def test_reject_detail_more_than_100_ref_ids(self):
+        client = Aepipe(BASE, TOKEN)
+        ids = [f"id-{i}" for i in range(101)]
+        with pytest.raises(ValidationError, match="max 100"):
+            client.detail("p", "s", ids)
+
+    def test_reject_blob_size_exceeding_16kb(self):
+        client = Aepipe(BASE, TOKEN)
+        big_blob = "x" * (16 * 1024)
+        with pytest.raises(ValidationError, match="16 KB"):
+            client.ingest("p", "s", [DataPoint(event="e", blobs=[big_blob])])
+
+    def test_blob_size_accounts_for_ref_id(self):
+        client = Aepipe(BASE, TOKEN)
+        # System blobs: "p"(1) + "s"(1) + "e"(1) + "info"(4) + UUID(36) = 43 bytes
+        # User blob = 16384 - 42 = 16342 → total 16385 > 16384
+        almost_full = "x" * (16 * 1024 - 42)
+        with pytest.raises(ValidationError):
+            client.ingest("p", "s", [DataPoint(event="e", blobs=[almost_full], payload={"k": "v"})])
+
+    def test_reject_index_exceeding_96_bytes(self):
+        client = Aepipe(BASE, TOKEN)
+        with pytest.raises(ValidationError, match="96-byte"):
+            client.ingest("a" * 64, "b" * 33, [DataPoint(event="e")])
+
+
+# ─── detail ──────────────────────────────────────────────────────────
+
+class TestDetail:
+    @patch("aepipe.client.urlopen")
+    def test_detail_returns_results(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(body={
+            "results": [
+                {"ref_id": "abc-123", "payload": {"stack": "Error..."}, "created_at": 1000, "expires_at": 2000},
+            ],
+        })
+        client = Aepipe(BASE, TOKEN)
+        result = client.detail("p", "s", ["abc-123"])
+        assert len(result.results) == 1
+        assert result.results[0].ref_id == "abc-123"
+        assert result.results[0].payload == {"stack": "Error..."}
+        assert result.results[0].created_at == 1000
+        assert result.results[0].expires_at == 2000
+
+        req = _capture_request(mock_urlopen)
+        assert req.full_url == f"{BASE}/v1/p/s/detail"
+        sent = json.loads(req.data)
+        assert sent["ref_ids"] == ["abc-123"]
+
+    def test_detail_empty_ref_ids(self):
+        client = Aepipe(BASE, TOKEN)
+        result = client.detail("p", "s", [])
+        assert result.results == []
+
+
+# ─── payload / ttl serialization ─────────────────────────────────────
+
+class TestPayloadTtl:
+    @patch("aepipe.client.urlopen")
+    def test_payload_and_ttl_serialized(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(body={"ok": True, "written": 1})
+        client = Aepipe(BASE, TOKEN)
+        client.ingest("p", "s", [DataPoint(event="e", payload={"key": "value"}, ttl=3600)])
+        sent = json.loads(_capture_request(mock_urlopen).data)
+        assert sent["points"][0]["payload"] == {"key": "value"}
+        assert sent["points"][0]["ttl"] == 3600
+
+    @patch("aepipe.client.urlopen")
+    def test_payload_and_ttl_omitted_when_not_set(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response(body={"ok": True, "written": 1})
+        client = Aepipe(BASE, TOKEN)
+        client.ingest("p", "s", [DataPoint(event="e")])
+        sent = json.loads(_capture_request(mock_urlopen).data)
+        assert "payload" not in sent["points"][0]
+        assert "ttl" not in sent["points"][0]

@@ -1,6 +1,6 @@
 {
   "name": "aepipe-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "JavaScript SDK for aepipe — multi-tenant log ingestion and query (browser & Node.js)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

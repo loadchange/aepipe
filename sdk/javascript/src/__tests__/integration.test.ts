@@ -121,6 +121,69 @@ describe("list", () => {
   });
 });
 
+// ─── ingest with payload (D1) ────────────────────────────────────────
+
+describe("ingest with payload", () => {
+  it("ingests a point with D1 payload", async () => {
+    const result = await client.ingest(PROJECT, LOGSTORE, [
+      {
+        event: "js_payload_test",
+        level: "error",
+        payload: { stack: "Error: test\n  at test.ts:1", url: "/api/test" },
+        ttl: 86400,
+      },
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.written).toBe(1);
+  });
+
+  it("ingests mixed points with and without payload", async () => {
+    const result = await client.ingest(PROJECT, LOGSTORE, [
+      { event: "js_no_payload" },
+      {
+        event: "js_with_payload",
+        payload: { data: "large content" },
+      },
+      { event: "js_also_no_payload", level: "warn" },
+    ]);
+    expect(result.ok).toBe(true);
+    expect(result.written).toBe(3);
+  });
+});
+
+// ─── detail (D1) ─────────────────────────────────────────────────────
+
+describe("detail", () => {
+  it("queries detail with ref_ids from AE", async () => {
+    // Wait for AE indexing
+    await sleep(3000);
+    // Query AE for ref_ids (blob5)
+    const aeResult = await client.query(
+      PROJECT,
+      LOGSTORE,
+      "SELECT blob5 as ref_id FROM aepipe WHERE blob5 != '' LIMIT 5",
+    );
+    // If there are ref_ids, fetch their payloads
+    const data = (aeResult as any)?.data ?? [];
+    if (data.length > 0) {
+      const refIds = data.map((r: any) => r.ref_id);
+      const detail = await client.detail(PROJECT, LOGSTORE, refIds);
+      expect(Array.isArray(detail.results)).toBe(true);
+      for (const entry of detail.results) {
+        expect(entry.ref_id).toBeDefined();
+        expect(entry.payload).toBeDefined();
+        expect(typeof entry.created_at).toBe("number");
+        expect(typeof entry.expires_at).toBe("number");
+      }
+    }
+  });
+
+  it("returns empty for empty ref_ids", async () => {
+    const result = await client.detail(PROJECT, LOGSTORE, []);
+    expect(result.results).toEqual([]);
+  });
+});
+
 // ─── validation ───────────────────────────────────────────────────────
 
 describe("validation", () => {

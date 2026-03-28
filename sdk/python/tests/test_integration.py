@@ -81,6 +81,38 @@ test("ingest batch of 3 points", test_ingest_batch)
 test("ingest with blobs and doubles", test_ingest_with_blobs_and_doubles)
 test("ingest empty event is skipped", test_ingest_empty_event_skipped)
 
+
+# ─────────────────────────────────────────────────────────────────────
+print("\n[1b] ingest with payload (D1)")
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_ingest_with_payload():
+    r = client.ingest(PROJECT, LOGSTORE, [
+        DataPoint(
+            event="py_payload_test",
+            level="error",
+            payload={"stack": "Error: test\n  at test.py:1", "url": "/api/test"},
+            ttl=86400,
+        ),
+    ])
+    assert r.ok is True, f"expected ok=True, got {r}"
+    assert r.written == 1
+
+
+def test_ingest_mixed_payload():
+    r = client.ingest(PROJECT, LOGSTORE, [
+        DataPoint(event="py_no_payload"),
+        DataPoint(event="py_with_payload", payload={"data": "large content"}),
+        DataPoint(event="py_also_no_payload", level="warn"),
+    ])
+    assert r.ok is True
+    assert r.written == 3
+
+
+test("ingest with D1 payload", test_ingest_with_payload)
+test("ingest mixed with/without payload", test_ingest_mixed_payload)
+
 # ─────────────────────────────────────────────────────────────────────
 print("\n[2] log (raw logs)")
 # ─────────────────────────────────────────────────────────────────────
@@ -188,6 +220,35 @@ def test_list_logstores():
 
 test("list projects", test_list_projects)
 test("list logstores", test_list_logstores)
+
+# ─────────────────────────────────────────────────────────────────────
+print("\n[5b] detail (D1)")
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_detail_from_ae():
+    """Query AE for ref_ids, then fetch payloads from D1."""
+    r = client.query(PROJECT, LOGSTORE,
+        "SELECT blob5 as ref_id FROM aepipe WHERE blob5 != '' LIMIT 5")
+    data = r.data.get("data", []) if isinstance(r.data, dict) else []
+    if data:
+        ref_ids = [row["ref_id"] for row in data]
+        detail = client.detail(PROJECT, LOGSTORE, ref_ids)
+        for entry in detail.results:
+            assert entry.ref_id, "ref_id should not be empty"
+            assert entry.payload is not None, "payload should not be None"
+            assert isinstance(entry.created_at, int)
+            assert isinstance(entry.expires_at, int)
+
+
+def test_detail_empty():
+    from aepipe import DetailResult
+    r = client.detail(PROJECT, LOGSTORE, [])
+    assert r.results == []
+
+
+test("detail from AE ref_ids", test_detail_from_ae)
+test("detail with empty ref_ids", test_detail_empty)
 
 # ─────────────────────────────────────────────────────────────────────
 print("\n[6] validation")

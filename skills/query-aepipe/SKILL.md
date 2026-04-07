@@ -1,243 +1,141 @@
 ---
 name: query-aepipe
-description: "Interact with aepipe Analytics Engine API — query logs, ingest events, list projects/logstores, and process query results with Python. Use this skill whenever the user mentions aepipe, analytics engine logs, log querying, event ingestion, logstore management, or wants to analyze/export/visualize data from their aepipe instance. Also triggers when the user wants to set up aepipe config, check aepipe connectivity, or work with structured event data stored in Cloudflare Analytics Engine."
+description: "Interact with aepipe Analytics Engine API -- query structured logs, ingest events, fetch D1 extended payloads, list projects/logstores, and process results. Use this skill whenever the user mentions aepipe, analytics engine logs, log querying, event ingestion, logstore management, D1 payloads, data truncation prevention, or wants to analyze/export/visualize data from their aepipe instance. Also triggers for aepipe config setup, connectivity checks, or working with structured event data in Cloudflare Analytics Engine or D1."
 ---
 
 # query-aepipe
 
-A toolkit for interacting with the [aepipe](../../README.md) HTTP API — a multi-tenant log ingestion and query service backed by Cloudflare Analytics Engine.
+A CLI toolkit for the aepipe HTTP API -- a multi-tenant log ingestion and query service backed by Cloudflare Analytics Engine, with optional D1 extended payload storage.
 
-## Install
+Python 3.8+ required. No pip dependencies (uses stdlib only).
 
-```bash
-npx skills add loadchange/aepipe
-```
+## Before You Start
 
-## Prerequisites
-
-Python 3.8+ is required for the data processing scripts. No external pip packages are needed — scripts use only the standard library (`urllib`, `json`, `csv`, `sqlite3`).
-
-## Configuration
-
-The ADMIN_TOKEN and API endpoint are stored persistently in `~/.config/query-aepipe/config.json`:
-
-```json
-{
-  "base_url": "https://your-aepipe-worker.example.com",
-  "admin_token": "your-bearer-token"
-}
-```
-
-### First-time setup
-
-If the config file doesn't exist, run the setup script to create it:
+Check if `~/.config/query-aepipe/config.json` exists. If not, run setup:
 
 ```bash
-python3 <skill-path>/scripts/setup_config.py
+python3 <skill-path>/scripts/setup_config.py --base-url https://your-worker.example.com --token YOUR_TOKEN
 ```
 
-This prompts for the base URL and token, validates connectivity by calling `GET /v1/projects`, and saves the config. You can also pass values directly:
+This validates connectivity and saves the config. All subsequent commands read from this file.
 
-```bash
-python3 <skill-path>/scripts/setup_config.py --base-url https://example.com --token SECRET
+## Which Command to Use
+
+| Goal | Command | Key Flags |
+|------|---------|----------|
+| See all projects | `projects` | |
+| See logstores in a project | `logstores <project>` | |
+| Write events to AE | `ingest <proj> <log>` | `--event`, `--file`, `--payload`, `--ttl` |
+| Query events with SQL | `query <proj> <log>` | `--sql`, `--format`, `-o` |
+| Write structured logs | `log <proj> <log>` | `--message`, `--level`, `--extra`, `--file` |
+| Query raw Worker logs | `rawlog <proj> <log>` | `--start`, `--end`, `--limit` |
+| Fetch D1 payloads by ref_id | `detail <proj> <log> <ids...>` | `--format`, `-o` |
+
+All commands: `python3 <skill-path>/scripts/aepipe_client.py <command> [args]`
+
+All query/rawlog/detail commands support `--format table|json|csv|jsonl` and `--output FILE`.
+
+## Query SQL Field Mapping
+
+The query endpoint talks to Cloudflare Analytics Engine SQL. Use these column names:
+
+| Column | Meaning | Notes |
+|--------|---------|-------|
+| `blob1` | project | Auto-filtered, don't include in WHERE |
+| `blob2` | logstore | Auto-filtered, don't include in WHERE |
+| `blob3` | event | User-provided event name |
+| `blob4` | level | "info", "warn", "error", "debug" |
+| `blob5` | ref_id | D1 payload UUID (empty string if none) |
+| `blob6`-`blob20` | user blobs[0..14] | Up to 15 extra strings |
+| `double1`-`double20` | user doubles[0..19] | Numeric fields |
+| `timestamp` | event time | |
+| `_sample_interval` | sampling factor | For accurate counts: `SUM(_sample_interval)` |
+
+The query endpoint automatically injects `blob1 = '{project}' AND blob2 = '{logstore}'`. Don't add these yourself.
+
+Example:
+```sql
+SELECT blob3 AS event, blob4 AS level, count() AS cnt
+FROM aepipe
+GROUP BY event, level ORDER BY cnt DESC LIMIT 20
 ```
 
-Before running any other script, always check if `~/.config/query-aepipe/config.json` exists. If not, run setup first.
+## D1 Extended Payload Storage
 
-## API Overview
+Analytics Engine has a **16 KB total blob size limit** per data point. Exceeding it causes **silent truncation** with no error. For larger data, use the `payload` field:
 
-aepipe organizes data into **projects** (top-level tenants) and **logstores** (log categories within a project). All endpoints require `Authorization: Bearer <ADMIN_TOKEN>`.
+### Writing payloads
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/projects` | List all projects |
-| `GET` | `/v1/{project}/logstores` | List logstores in a project |
-| `POST` | `/v1/{project}/{logstore}/ingest` | Write up to 250 event points |
-| `POST` | `/v1/{project}/{logstore}/query` | Run SQL query (auto-scoped to project/logstore) |
-| `POST` | `/v1/{project}/{logstore}/log` | Write structured logs (via Workers Observability) |
-| `POST` | `/v1/{project}/{logstore}/rawlog` | Query raw Worker logs (via CF Telemetry REST API) |
-
-### Data Point Structure (ingest)
-
-Each ingested point has:
-- `event` (string, required) — the event name
-- `level` (string, optional, default "info") — log level
-- `blobs` (string[], optional) — up to 16 extra string fields (mapped to blob5–blob20)
-- `doubles` (number[], optional) — up to 20 numeric fields (mapped to double1–double20)
-
-### Query SQL Field Mapping
-
-When writing SQL for the query endpoint, use these Analytics Engine column names:
-
-| Column | Meaning |
-|--------|---------|
-| `blob1` | project name (auto-filtered) |
-| `blob2` | logstore name (auto-filtered) |
-| `blob3` | event |
-| `blob4` | level |
-| `blob5`–`blob20` | user blobs[0..15] |
-| `double1`–`double20` | user doubles[0..19] |
-| `timestamp` | event timestamp |
-| `_sample_interval` | sampling interval |
-
-The query endpoint automatically injects `blob1 = '{project}' AND blob2 = '{logstore}'` — you do NOT need to include these filters yourself.
-
-### Log Entry Structure (log)
-
-The `log` endpoint writes structured logs to Workers Observability (not Analytics Engine). Each log entry:
-- `message` (string, required) — the log message
-- `level` (string, optional, default "info") — log level ("info", "warn", "error", "debug"), controls which console method is used
-- Any additional fields are preserved in the JSON output
-
-Request body: `{"logs": [{"message": "something happened", "level": "error", "extra": "data"}]}`
-
-### Raw Log Query (rawlog)
-
-The `rawlog` endpoint queries Workers invocation logs via the CF Telemetry REST API, filtered by project/logstore. Request body:
-- `limit` (number, optional, default 50, max 200) — number of invocations to fetch
-- `start` (ISO string, optional, default 6 hours ago) — start of time range
-- `end` (ISO string, optional, default now) — end of time range
-
-Returns `{logs: [{timestamp, level, data}], count}` where `data` is the parsed JSON log content.
-
-## Scripts
-
-All scripts are in `<skill-path>/scripts/` and read config from `~/.config/query-aepipe/config.json`.
-
-### aepipe_client.py — Full API Client
-
-A unified CLI for all aepipe API operations:
+Include `payload` (JSON object) in your data point. The server stores it in D1 and puts a UUID reference in AE `blob5`:
 
 ```bash
-# List projects
-python3 <skill-path>/scripts/aepipe_client.py projects
+# Single event with payload
+python3 <skill-path>/scripts/aepipe_client.py ingest myproject mylog \
+  --event "api_trace" --payload '{"request":{"body":"large..."},"response":{"body":"large..."}}'
 
-# List logstores in a project
-python3 <skill-path>/scripts/aepipe_client.py logstores <project>
-
-# Ingest events
-python3 <skill-path>/scripts/aepipe_client.py ingest <project> <logstore> \
-  --event "user_login" --level info \
-  --blobs '["chrome","mac"]' --doubles '[1.5, 200]'
-
-# Ingest from JSON file (array of DataPoint objects)
-python3 <skill-path>/scripts/aepipe_client.py ingest <project> <logstore> \
-  --file events.json
-
-# Query with SQL
-python3 <skill-path>/scripts/aepipe_client.py query <project> <logstore> \
-  --sql "SELECT blob3 AS event, count() AS cnt FROM aepipe GROUP BY event ORDER BY cnt DESC LIMIT 10"
-
-# Query with output format
-python3 <skill-path>/scripts/aepipe_client.py query <project> <logstore> \
-  --sql "SELECT * FROM aepipe LIMIT 100" \
-  --format csv --output results.csv
-
-# Write structured logs (Workers Observability)
-python3 <skill-path>/scripts/aepipe_client.py log <project> <logstore> \
-  --message "deploy completed" --level info
-
-# Write log with extra fields
-python3 <skill-path>/scripts/aepipe_client.py log <project> <logstore> \
-  --message "request failed" --level error --extra '{"url":"/api","status":500}'
-
-# Write logs from JSON file
-python3 <skill-path>/scripts/aepipe_client.py log <project> <logstore> \
-  --file logs.json
-
-# Query raw Worker logs (last 6 hours by default)
-python3 <skill-path>/scripts/aepipe_client.py rawlog <project> <logstore>
-
-# Query raw logs with time range and limit
-python3 <skill-path>/scripts/aepipe_client.py rawlog <project> <logstore> \
-  --start "2026-03-20T00:00:00Z" --end "2026-03-20T12:00:00Z" --limit 100
-
-# Export raw logs to JSON
-python3 <skill-path>/scripts/aepipe_client.py rawlog <project> <logstore> \
-  --format json --output rawlogs.json
+# With custom TTL (7 days instead of default 90 days)
+python3 <skill-path>/scripts/aepipe_client.py ingest myproject mylog \
+  --event "temp_debug" --payload '{"stack":"..."}' --ttl 604800
 ```
 
-### query_processor.py — Advanced Query Processing
+Batch ingest with payloads via `--file` works too -- include `payload` and optional `ttl` per point in the JSON array.
 
-For sophisticated data analysis after querying. Reads query results (JSON or CSV) and applies transformations:
+### Reading payloads
+
+Two-step process: query AE to find ref_ids, then fetch from D1:
 
 ```bash
-# Basic query and process pipeline
+# Step 1: Find events with payloads (blob5 is non-empty)
 python3 <skill-path>/scripts/aepipe_client.py query myproject mylog \
-  --sql "SELECT blob3, blob4, double1, timestamp FROM aepipe LIMIT 1000" \
-  --format json --output raw.json
+  --sql "SELECT blob3, blob5 AS ref_id, timestamp FROM aepipe WHERE blob5 != '' ORDER BY timestamp DESC LIMIT 20" \
+  --format json
 
-# Process: filter, aggregate, sort, export
-python3 <skill-path>/scripts/query_processor.py raw.json \
-  --filter 'blob4 == "error"' \
-  --group-by blob3 \
-  --agg 'count:cnt,sum:double1:total,avg:double1:average' \
-  --sort-by cnt --desc \
-  --format table
-
-# Export to CSV
-python3 <skill-path>/scripts/query_processor.py raw.json \
-  --group-by blob3 \
-  --agg 'count:cnt' \
-  --format csv --output summary.csv
-
-# Export to SQLite for further analysis
-python3 <skill-path>/scripts/query_processor.py raw.json \
-  --to-sqlite analysis.db --table events
-
-# Time-based aggregation
-python3 <skill-path>/scripts/query_processor.py raw.json \
-  --time-bucket hour --time-field timestamp \
-  --agg 'count:cnt' \
-  --format table
-
-# Top-N analysis
-python3 <skill-path>/scripts/query_processor.py raw.json \
-  --group-by blob3 --agg 'count:cnt' --sort-by cnt --desc --limit 20 \
-  --format table
+# Step 2: Fetch full payloads from D1 using ref_ids from step 1
+python3 <skill-path>/scripts/aepipe_client.py detail myproject mylog \
+  <ref_id_1> <ref_id_2> --format json
 ```
+
+The detail endpoint returns `{results: [{ref_id, payload, created_at, expires_at}]}`. Max 100 ref_ids per request.
 
 ## Common Workflows
 
-### Explore what's in the system
+### Explore the system
 
 ```bash
-# Step 1: See all projects
-python3 scripts/aepipe_client.py projects
-
-# Step 2: See logstores in a project
-python3 scripts/aepipe_client.py logstores myproject
-
-# Step 3: Sample recent events
-python3 scripts/aepipe_client.py query myproject mylog \
+python3 <skill-path>/scripts/aepipe_client.py projects
+python3 <skill-path>/scripts/aepipe_client.py logstores myproject
+python3 <skill-path>/scripts/aepipe_client.py query myproject mylog \
   --sql "SELECT blob3 AS event, blob4 AS level, timestamp FROM aepipe ORDER BY timestamp DESC LIMIT 20"
 ```
 
 ### Error analysis
 
 ```bash
-# Query errors
-python3 scripts/aepipe_client.py query myproject mylog \
+# Export raw data, then analyze with query_processor
+python3 <skill-path>/scripts/aepipe_client.py query myproject mylog \
   --sql "SELECT blob3, blob4, double1, timestamp FROM aepipe LIMIT 5000" \
   --format json --output raw.json
 
-# Filter and aggregate errors
-python3 scripts/query_processor.py raw.json \
+python3 <skill-path>/scripts/query_processor.py raw.json \
   --filter 'blob4 == "error"' \
-  --group-by blob3 --agg 'count:cnt' --sort-by cnt --desc \
-  --format table
+  --group-by blob3 --agg 'count:cnt' --sort-by cnt --desc --format table
 ```
 
-### Bulk ingest from file
-
-Prepare a JSON file with an array of data points:
-```json
-[
-  {"event": "page_view", "level": "info", "blobs": ["/home"], "doubles": [1.2]},
-  {"event": "click", "level": "info", "blobs": ["buy_btn"], "doubles": [0.5]}
-]
-```
+### Structured logging (Workers Observability)
 
 ```bash
-python3 scripts/aepipe_client.py ingest myproject mylog --file events.json
+python3 <skill-path>/scripts/aepipe_client.py log myproject mylog \
+  --message "deploy completed" --level info --extra '{"version":"1.2.3"}'
+```
+
+The `log` endpoint writes to Workers Observability (not AE). Query these with `rawlog`.
+
+## Advanced Processing
+
+For post-query filtering, grouping, aggregation, time bucketing, and export to SQLite/CSV, use `query_processor.py`. Read `<skill-path>/references/processing.md` for the full reference.
+
+Quick example:
+```bash
+python3 <skill-path>/scripts/query_processor.py raw.json \
+  --time-bucket hour --time-field timestamp --agg 'count:cnt' --format table
 ```

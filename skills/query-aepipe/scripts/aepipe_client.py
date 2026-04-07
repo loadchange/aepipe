@@ -48,6 +48,63 @@ def api_request(config, method, path, body=None):
         sys.exit(1)
 
 
+def format_table(rows):
+    """Format rows as an aligned ASCII table."""
+    if not rows:
+        return "(empty)"
+    cols = list(rows[0].keys())
+    widths = {c: len(c) for c in cols}
+    str_rows = []
+    for row in rows:
+        str_row = {}
+        for c in cols:
+            val = row.get(c, "")
+            s = str(val) if val is not None else ""
+            if len(s) > 80:
+                s = s[:77] + "..."
+            str_row[c] = s
+            widths[c] = max(widths[c], len(s))
+        str_rows.append(str_row)
+    header = " | ".join(c.ljust(widths[c]) for c in cols)
+    sep = "-+-".join("-" * widths[c] for c in cols)
+    lines = [header, sep]
+    for sr in str_rows:
+        lines.append(" | ".join(sr[c].ljust(widths[c]) for c in cols))
+    return "\n".join(lines)
+
+
+def format_output(rows, fmt, output_file=None, label="row"):
+    """Format and write rows in the specified format. Shared by all commands."""
+    if not rows:
+        print(f"No {label}s found.")
+        return
+
+    if fmt == "json":
+        text = json.dumps(rows, indent=2, ensure_ascii=False)
+    elif fmt == "jsonl":
+        text = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
+    elif fmt == "csv":
+        buf = io.StringIO()
+        cols = list(rows[0].keys())
+        writer = csv.DictWriter(buf, fieldnames=cols)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({c: json.dumps(r[c], ensure_ascii=False)
+                             if isinstance(r[c], (dict, list)) else r.get(c, "")
+                             for c in cols})
+        text = buf.getvalue()
+    else:  # table
+        text = format_table(rows)
+
+    if output_file:
+        with open(output_file, "w") as f:
+            f.write(text)
+        print(f"Wrote {len(rows)} {label}(s) to {output_file}")
+    else:
+        print(text)
+        print(f"\n--- {len(rows)} {label}(s) ---")
+
+
 def cmd_projects(args, config):
     result = api_request(config, "GET", "/v1/projects")
     projects = result.get("projects", [])
@@ -93,9 +150,12 @@ def cmd_ingest(args, config):
             point["blobs"] = json.loads(args.blobs)
         if args.doubles:
             point["doubles"] = json.loads(args.doubles)
+        if args.payload:
+            point["payload"] = json.loads(args.payload)
+        if args.ttl:
+            point["ttl"] = args.ttl
         points = [point]
 
-    # Batch in groups of 250
     total_written = 0
     for i in range(0, len(points), 250):
         batch = points[i:i + 250]
@@ -111,45 +171,8 @@ def cmd_query(args, config):
     result = api_request(config, "POST",
                          f"/v1/{args.project}/{args.logstore}/query",
                          {"sql": args.sql})
-
-    # The CF Analytics Engine response has {meta, data, rows, ...}
     rows = result.get("data", [])
-    meta = result.get("meta", [])
-
-    if not rows:
-        print("No results.")
-        return
-
-    # Determine output format
-    fmt = args.format or "table"
-    output_file = args.output
-
-    if fmt == "json":
-        text = json.dumps(rows, indent=2, ensure_ascii=False)
-    elif fmt == "csv":
-        if not rows:
-            text = ""
-        else:
-            buf = io.StringIO()
-            cols = list(rows[0].keys())
-            writer = csv.DictWriter(buf, fieldnames=cols)
-            writer.writeheader()
-            writer.writerows(rows)
-            text = buf.getvalue()
-    elif fmt == "jsonl":
-        text = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
-    else:  # table
-        text = format_table(rows)
-
-    if output_file:
-        with open(output_file, "w") as f:
-            f.write(text)
-        print(f"Wrote {len(rows)} rows to {output_file}")
-    else:
-        print(text)
-
-    if not output_file:
-        print(f"\n--- {len(rows)} row(s) ---")
+    format_output(rows, args.format, args.output, label="row")
 
 
 def cmd_log(args, config):
@@ -169,7 +192,6 @@ def cmd_log(args, config):
             entry.update(json.loads(args.extra))
         logs = [entry]
 
-    # Batch in groups of 250
     total_written = 0
     for i in range(0, len(logs), 250):
         batch = logs[i:i + 250]
@@ -179,6 +201,19 @@ def cmd_log(args, config):
         total_written += result.get("written", 0)
 
     print(f"Logged {total_written} entry(ies) to {args.project}/{args.logstore}")
+
+
+def cmd_detail(args, config):
+    result = api_request(config, "POST",
+                         f"/v1/{args.project}/{args.logstore}/detail",
+                         {"ref_ids": args.ref_ids})
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    results = result.get("results", [])
+    format_output(results, args.format, args.output, label="payload")
 
 
 def cmd_rawlog(args, config):
@@ -195,79 +230,13 @@ def cmd_rawlog(args, config):
                          body)
 
     logs = result.get("logs", [])
-    count = result.get("count", len(logs))
+    # Normalize data field for display
+    for log in logs:
+        data = log.get("data", "")
+        if isinstance(data, (dict, list)):
+            log["data"] = json.dumps(data, ensure_ascii=False)
 
-    if not logs:
-        print("No raw logs found.")
-        return
-
-    fmt = args.format or "table"
-    output_file = args.output
-
-    if fmt == "json":
-        text = json.dumps(logs, indent=2, ensure_ascii=False)
-    elif fmt == "csv":
-        buf = io.StringIO()
-        cols = ["timestamp", "level", "data"]
-        writer = csv.DictWriter(buf, fieldnames=cols)
-        writer.writeheader()
-        for log in logs:
-            writer.writerow({
-                "timestamp": log.get("timestamp", ""),
-                "level": log.get("level", ""),
-                "data": json.dumps(log.get("data", ""), ensure_ascii=False),
-            })
-        text = buf.getvalue()
-    elif fmt == "jsonl":
-        text = "\n".join(json.dumps(l, ensure_ascii=False) for l in logs)
-    else:  # table
-        table_rows = []
-        for log in logs:
-            data = log.get("data", "")
-            data_str = json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
-            table_rows.append({
-                "timestamp": log.get("timestamp", ""),
-                "level": log.get("level", ""),
-                "data": data_str,
-            })
-        text = format_table(table_rows)
-
-    if output_file:
-        with open(output_file, "w") as f:
-            f.write(text)
-        print(f"Wrote {count} log(s) to {output_file}")
-    else:
-        print(text)
-        print(f"\n--- {count} log(s) ---")
-
-
-def format_table(rows):
-    """Format rows as an aligned ASCII table."""
-    if not rows:
-        return "(empty)"
-
-    cols = list(rows[0].keys())
-    # Calculate column widths
-    widths = {c: len(c) for c in cols}
-    str_rows = []
-    for row in rows:
-        str_row = {}
-        for c in cols:
-            val = row.get(c, "")
-            s = str(val) if val is not None else ""
-            if len(s) > 60:
-                s = s[:57] + "..."
-            str_row[c] = s
-            widths[c] = max(widths[c], len(s))
-        str_rows.append(str_row)
-
-    # Build table
-    header = " | ".join(c.ljust(widths[c]) for c in cols)
-    sep = "-+-".join("-" * widths[c] for c in cols)
-    lines = [header, sep]
-    for sr in str_rows:
-        lines.append(" | ".join(sr[c].ljust(widths[c]) for c in cols))
-    return "\n".join(lines)
+    format_output(logs, args.format, args.output, label="log")
 
 
 def main():
@@ -291,6 +260,8 @@ def main():
     p_in.add_argument("--level", help="Log level (default: info)")
     p_in.add_argument("--blobs", help="JSON array of extra blob strings")
     p_in.add_argument("--doubles", help="JSON array of numeric values")
+    p_in.add_argument("--payload", help="JSON object for D1 extended storage (avoids AE 16KB truncation)")
+    p_in.add_argument("--ttl", type=int, help="Payload TTL in seconds (default: 90 days)")
     p_in.add_argument("--file", help="JSON file with array of data points")
 
     # query
@@ -311,6 +282,15 @@ def main():
     p_log.add_argument("--extra", help="JSON object with extra fields")
     p_log.add_argument("--file", help="JSON file with array of log entries")
 
+    # detail
+    p_dt = sub.add_parser("detail", help="Fetch extended payloads from D1 by ref_ids")
+    p_dt.add_argument("project", help="Project name")
+    p_dt.add_argument("logstore", help="Logstore name")
+    p_dt.add_argument("ref_ids", nargs="+", help="One or more ref_id UUIDs (from blob5)")
+    p_dt.add_argument("--format", choices=["table", "json", "csv", "jsonl"],
+                     default="json", help="Output format (default: json)")
+    p_dt.add_argument("--output", "-o", help="Write output to file")
+
     # rawlog
     p_rl = sub.add_parser("rawlog", help="Query raw Worker logs")
     p_rl.add_argument("project", help="Project name")
@@ -325,24 +305,25 @@ def main():
     args = parser.parse_args()
     config = load_config()
 
-    if args.command == "projects":
-        cmd_projects(args, config)
-    elif args.command == "logstores":
-        cmd_logstores(args, config)
-    elif args.command == "ingest":
-        if not args.file and not args.event:
-            print("Either --event or --file is required.", file=sys.stderr)
-            sys.exit(1)
-        cmd_ingest(args, config)
-    elif args.command == "query":
-        cmd_query(args, config)
-    elif args.command == "log":
-        if not args.file and not args.message:
-            print("Either --message or --file is required.", file=sys.stderr)
-            sys.exit(1)
-        cmd_log(args, config)
-    elif args.command == "rawlog":
-        cmd_rawlog(args, config)
+    cmds = {
+        "projects": lambda: cmd_projects(args, config),
+        "logstores": lambda: cmd_logstores(args, config),
+        "ingest": lambda: cmd_ingest(args, config),
+        "query": lambda: cmd_query(args, config),
+        "log": lambda: cmd_log(args, config),
+        "detail": lambda: cmd_detail(args, config),
+        "rawlog": lambda: cmd_rawlog(args, config),
+    }
+
+    # Pre-flight validation
+    if args.command == "ingest" and not args.file and not args.event:
+        print("Either --event or --file is required.", file=sys.stderr)
+        sys.exit(1)
+    if args.command == "log" and not args.file and not args.message:
+        print("Either --message or --file is required.", file=sys.stderr)
+        sys.exit(1)
+
+    cmds[args.command]()
 
 
 if __name__ == "__main__":

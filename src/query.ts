@@ -241,7 +241,14 @@ export async function handleDetail(
     return jsonResponse({ error: "max 100 ref_ids per request" }, 400);
   }
 
-  const rows = await readPayloads(env.DB, body.ref_ids);
+  let rows;
+  try {
+    rows = await readPayloads(env.DB, body.ref_ids);
+  } catch (err) {
+    console.error("D1 payload read failed", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    return jsonResponse({ error: `payload store unavailable: ${msg}` }, 503);
+  }
 
   const results = rows.map((row) => ({
     ref_id: row.ref_id,

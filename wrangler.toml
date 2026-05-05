@@ -30,5 +30,5 @@ dataset = "aepipe"
 # 2. Uncomment the block below and paste your database_id
 [[d1_databases]]
 binding = "DB"
-database_name = "aepipe-payloads"
-database_id = "96058cd6-bd12-4a53-987b-3efbb41b5455"
+database_name = "aepipe-payloads-next"
+database_id = "50a2aa5a-c2ea-4955-aa13-68786dd302c8"

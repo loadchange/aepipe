@@ -88,9 +88,23 @@ export async function handleIngest(
     validPoints.push({ point, refId });
   }
 
-  // Phase 2: batch write to D1 (cleanup expired + insert)
+  // Phase 2: batch write to D1. If D1 fails, degrade gracefully — AE writes
+  // still proceed with empty ref_ids so ingest does not surface as a 5xx /
+  // 1101 to callers. The payload-storage outage becomes "details temporarily
+  // missing" instead of "ingest is down".
+  let payloadDegraded = false;
+  let payloadError: string | undefined;
   if (d1Ops.length > 0 && env.DB) {
-    await batchWritePayloads(env.DB, d1Ops);
+    try {
+      await batchWritePayloads(env.DB, d1Ops);
+    } catch (err) {
+      payloadDegraded = true;
+      payloadError = err instanceof Error ? err.message : String(err);
+      console.error("D1 payload write failed; degrading to AE-only", err);
+      for (const vp of validPoints) {
+        vp.refId = undefined;
+      }
+    }
   }
 
   // Phase 3: write all AE data points
@@ -99,7 +113,12 @@ export async function handleIngest(
     console.log(JSON.stringify({ project, logstore, ...point }));
   }
 
-  return jsonResponse({ ok: true, written: validPoints.length });
+  const resp: Record<string, unknown> = { ok: true, written: validPoints.length };
+  if (payloadDegraded) {
+    resp.payload_degraded = true;
+    resp.payload_error = payloadError;
+  }
+  return jsonResponse(resp);
 }
 
 export async function handleLog(
